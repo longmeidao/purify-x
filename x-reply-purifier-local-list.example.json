@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "block": [
+    "elhomie51",
+    "albir101"
+  ],
+  "allow": [],
+  "keywords": [],
+  "subscriptions": [],
+  "builtInSources": [
+    "mxga",
+    "twitterBlockPorn",
+    "tweetGuard"
+  ],
+  "builtInSourceCatalogVersion": 2
+}
