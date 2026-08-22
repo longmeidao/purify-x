@@ -95,7 +95,11 @@ test("可疑账号与推广内容使用两个独立时间线选项", () => {
   assert.match(source, /const timelineMode = filterScope === "timeline";/);
   assert.match(
     source,
-    /currentStatusId === mainStatusId\s*\? "none"\s*:\s*"thread-reply"/,
+    /currentStatusId === mainStatusId\s*\|\|\s*\(mainAuthorHandle && currentAuthorHandle === mainAuthorHandle\)/,
+  );
+  assert.match(
+    source,
+    /mainAuthorHandle:\s*authorHandleFromStatusPath\(\),\s*currentAuthorHandle:\s*handle,/,
   );
   assert.doesNotMatch(source, /threadMainMode/);
   assert.match(

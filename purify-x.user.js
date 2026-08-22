@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.7.5
+// @version      2.7.6
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -24,7 +24,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.7.5";
+  const VERSION = "2.7.6";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -3973,6 +3973,19 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return match ? match[1] : "";
   }
 
+  // 详情页 URL 自带主贴作者 handle（/handle/status/id），比 DOM 抽取更可靠；
+  // 即使正文卡片的 statusId 提取异常，也能用它兜底识别主贴作者的身份。
+  function authorHandleFromStatusPath(pathname = location.pathname) {
+    const parts = String(pathname || "")
+      .split("/")
+      .filter(Boolean)
+      .map((part) => part.toLowerCase());
+    const statusIndex = parts.indexOf("status");
+    if (statusIndex < 1) return "";
+    const candidate = parts[statusIndex - 1];
+    return HANDLE_RE.test(candidate) ? candidate : "";
+  }
+
   function detailNavigationStatusId(sourceHref, targetHref) {
     try {
       const source = new URL(sourceHref);
@@ -4086,17 +4099,24 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return "wait";
   }
 
-  // 用户进入详情页就是为了阅读主贴，因此主贴始终保留；只有下方回复运行完整
-  // 内容与行为规则。时间线的账号名单和高置信推广分别由独立开关控制。
+  // 用户进入详情页就是为了阅读主贴，因此主贴始终保留；主贴作者在本会话里的
+  // 自续写回复同样放行（用户主动点进该账号的帖子，即有意阅读其内容），只有
+  // 其他账号的回复运行完整内容与行为规则。时间线的账号名单和高置信推广分别由
+  // 独立开关控制。身份判定优先比 statusId，DOM 提取异常时回落到作者 handle。
   function articleFilterScope({
     mainStatusId = "",
     currentStatusId = "",
+    mainAuthorHandle = "",
+    currentAuthorHandle = "",
     timelineEligible = false,
     filterTimeline = false,
     filterTimelinePromotions = false,
   } = {}) {
     if (mainStatusId) {
-      return currentStatusId === mainStatusId ? "none" : "thread-reply";
+      const isFocusOrThreadAuthor =
+        currentStatusId === mainStatusId ||
+        (mainAuthorHandle && currentAuthorHandle === mainAuthorHandle);
+      return isFocusOrThreadAuthor ? "none" : "thread-reply";
     }
     return timelineEligible && (filterTimeline || filterTimelinePromotions)
       ? "timeline"
@@ -5530,16 +5550,18 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const accountTimelineEligible = isFilterableTimeline();
     const promotionTimelineEligible =
       accountTimelineEligible || isProfilePostTimeline();
+    const handle = articleHandle(article);
     const filterScope = articleFilterScope({
       mainStatusId,
       currentStatusId,
+      mainAuthorHandle: authorHandleFromStatusPath(),
+      currentAuthorHandle: handle,
       timelineEligible:
         accountTimelineEligible || promotionTimelineEligible,
       filterTimeline: preferences.filterTimeline,
       filterTimelinePromotions: preferences.filterTimelinePromotions,
     });
     const timelineMode = filterScope === "timeline";
-    const handle = articleHandle(article);
     if (filterScope === "none") {
       annotateReplyResult(article, null, handle);
       unhideArticle(article, "visible");
@@ -7456,6 +7478,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       ? {
           test: Object.freeze({
             actionIdentityFromMetadata,
+            authorHandleFromStatusPath,
             articleFilteringSurfaceEnabled,
             articleFilterScope,
             contentPolicyForSurface,

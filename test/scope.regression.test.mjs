@@ -50,6 +50,24 @@ test("账号主页是推广过滤范围，但详情页主贴仍不是", () => {
   );
 });
 
+test("详情页 URL 解析出主贴作者 handle，非法路径返回空", () => {
+  assert.equal(
+    api.authorHandleFromStatusPath(
+      "/FortuneCutie00/status/2089971970238750960",
+    ),
+    "fortunecutie00",
+  );
+  assert.equal(
+    api.authorHandleFromStatusPath(
+      "/FortuneCutie00/status/2089971970238750960/photo/1",
+    ),
+    "fortunecutie00",
+  );
+  assert.equal(api.authorHandleFromStatusPath("/home"), "");
+  assert.equal(api.authorHandleFromStatusPath("/status/123"), "");
+  assert.equal(api.authorHandleFromStatusPath(""), "");
+});
+
 test("扫描入口不会跳过账号主页帖子列表", () => {
   assert.equal(api.articleFilteringSurfaceEnabled(), false);
   assert.equal(

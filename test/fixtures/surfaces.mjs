@@ -23,6 +23,62 @@ export const surfaceCases = [
     },
     expectedScope: "thread-reply",
   },
+  {
+    id: "fortunecutie00-detail-main-handle-fallback",
+    note: "2026-08-23 实测：主贴 statusId 提取异常时按作者 handle 放行，MXGA 命中也不能隐藏主贴",
+    input: {
+      mainStatusId: "2089971970238750960",
+      currentStatusId: "",
+      mainAuthorHandle: "fortunecutie00",
+      currentAuthorHandle: "fortunecutie00",
+      timelineEligible: false,
+      filterTimeline: false,
+      filterTimelinePromotions: true,
+    },
+    expectedScope: "none",
+  },
+  {
+    id: "fortunecutie00-detail-self-reply-visible",
+    note: "2026-08-23 需求：详情页里主贴作者自己的续写回复不进入隐藏过滤",
+    input: {
+      mainStatusId: "2089971970238750960",
+      currentStatusId: "2089972000000000000",
+      mainAuthorHandle: "fortunecutie00",
+      currentAuthorHandle: "fortunecutie00",
+      timelineEligible: false,
+      filterTimeline: false,
+      filterTimelinePromotions: true,
+    },
+    expectedScope: "none",
+  },
+  {
+    id: "detail-other-author-reply-still-filtered-with-handles",
+    note: "同页其他账号的回复仍进入完整回复过滤，handle 不相等才生效",
+    input: {
+      mainStatusId: "2089971970238750960",
+      currentStatusId: "2089972100000000000",
+      mainAuthorHandle: "fortunecutie00",
+      currentAuthorHandle: "randomreplier",
+      timelineEligible: false,
+      filterTimeline: false,
+      filterTimelinePromotions: true,
+    },
+    expectedScope: "thread-reply",
+  },
+  {
+    id: "detail-missing-main-handle-keeps-old-behavior",
+    note: "URL 里解析不出作者 handle 时回落到纯 statusId 判定",
+    input: {
+      mainStatusId: "2089971970238750960",
+      currentStatusId: "2089972000000000000",
+      mainAuthorHandle: "",
+      currentAuthorHandle: "fortunecutie00",
+      timelineEligible: false,
+      filterTimeline: false,
+      filterTimelinePromotions: true,
+    },
+    expectedScope: "thread-reply",
+  },
 ];
 
 export const profileMediaRoutes = [
