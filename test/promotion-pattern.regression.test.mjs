@@ -72,7 +72,7 @@ test("t.co 缩链结合可见文本识别 Telegram 与普通外链", () => {
   );
 });
 
-test("只有关闭评论、外链、推广话术三者齐全才覆盖已关注保护", () => {
+test("Telegram 与推广话术可覆盖已关注，普通外链仍要求限制回复", () => {
   const text = "回馈粉丝，限时无门槛观看完整版，唯一链接 t.me/example";
   assert.equal(
     promotionPattern(text, {
@@ -88,12 +88,28 @@ test("只有关闭评论、外链、推广话术三者齐全才覆盖已关注�
       hasExternalLink: true,
       telegramLink: true,
     }).highConfidence,
+    true,
+  );
+  assert.equal(
+    promotionPattern(text, {
+      repliesRestricted: false,
+      hasExternalLink: true,
+      telegramLink: false,
+    }).highConfidence,
     false,
   );
   assert.equal(
     promotionPattern("普通技术文章", {
       repliesRestricted: true,
       hasExternalLink: true,
+    }).highConfidence,
+    false,
+  );
+  assert.equal(
+    promotionPattern("项目源码发布在 Telegram：t.me/example", {
+      repliesRestricted: false,
+      hasExternalLink: true,
+      telegramLink: true,
     }).highConfidence,
     false,
   );

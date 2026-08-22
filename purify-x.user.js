@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.7.2
+// @version      2.7.3
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -24,7 +24,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.7.2";
+  const VERSION = "2.7.3";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -312,8 +312,9 @@
   const CONTACT_RE =
     /(^|[^a-z])(vx|v信|微\s*信全国q|telegram|tg|电报|line|whats\s*app|飞机号|群号|加\s*v)([^a-z]|$)/i;
 
-  // 关闭评论的推广帖常用「回馈粉丝、福利群、完整版、限时免费、唯一链接」
-  // 一类话术。它们单独出现并不定罪，必须再结合结构化回复权限和正文外链。
+  // 推广帖常用「回馈粉丝、福利群、完整版、限时免费、唯一链接」一类话术。
+  // 普通外链仍须结合结构化回复限制；Telegram 引流本身更明确，可与推广话术
+  // 组成高置信组合。单独的外链或推广词都不定罪。
   const PROMOTION_COPY_RE =
     /(回馈.{0,8}粉丝|反馈.{0,8}粉丝|福利群|分享给粉丝|粉丝.{0,8}(支持|福利|免费|无门槛)|私密空间|不用.{0,3}(付费|收费)|今天.{0,4}进[群裙]|限时.{0,8}(免费|无门槛|进入)|免费.{0,5}开放|(?:免费|无门槛).{0,12}(进入|进[群裙]|观看|完整版|互动)|(?:完整|完整版).{0,8}(视频|写真|互动)|(视频|写真).{0,5}完整版|进[群裙].{0,5}入口|线上\s*1v1|唯一链接|私信暗号|进群方式|下载.{0,8}(纸飞机|飞机|telegram)|永久更新|极品推荐|打开即玩|无限制\s*ai)/i;
 
@@ -473,12 +474,15 @@
     const telegramLink = options.telegramLink === true;
     const hasExternalLink = telegramLink || options.hasExternalLink === true;
     const promotionCopy = PROMOTION_COPY_RE.test(normalize(rawText));
+    const restrictedExternalPromotion =
+      repliesRestricted && hasExternalLink && promotionCopy;
+    const telegramPromotion = telegramLink && promotionCopy;
     return {
       repliesRestricted,
       hasExternalLink,
       telegramLink,
       promotionCopy,
-      highConfidence: repliesRestricted && hasExternalLink && promotionCopy,
+      highConfidence: restrictedExternalPromotion || telegramPromotion,
     };
   }
 
@@ -1822,7 +1826,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
                 <span class="xps-source-check" aria-hidden="true">✓</span>
                 <span class="xps-source-copy">
                   <span class="xps-source-title">屏蔽时间线中的推广内容</span>
-                  <small>默认开启。只处理同时命中限制回复、正文外链和推广话术的高置信内容。</small>
+                  <small>默认开启。处理 Telegram 外链与推广话术组合；普通外链仍须同时限制回复。</small>
                 </span>
               </label>
               <label class="xps-source-card">
@@ -3822,7 +3826,9 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     if (promotion.highConfidence) {
       add(
         2,
-        "关闭评论、外部链接与推广话术同时出现",
+        promotion.repliesRestricted
+          ? "限制回复、外部链接与推广话术同时出现"
+          : "Telegram 外链与推广话术同时出现",
         EVIDENCE_SOURCE.pattern,
       );
     }

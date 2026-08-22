@@ -10,6 +10,19 @@
 
 export const spam = [
   {
+    id: "followed-promo-telegram-open-replies",
+    note: "2026-08-22 实测：@SerenaMotolaYe 开放回复，以粉丝福利和完整版视频引流到 t.me",
+    text: "感恩粉丝一路关注！今日专属福利回馈大家～免费进粉丝群，直接解锁过往+近期所有完整版视频、新作及写真集！无门槛 进裙入口：https://t.me/fensifu11（跳转浏览器打开）暗号「野」手慢无～注：未满18岁，禁止入内！",
+    name: "世理野",
+    handle: "SerenaMotolaYe",
+    options: {
+      repliesRestricted: false,
+      hasExternalLink: true,
+      telegramLink: true,
+    },
+    minScore: 9,
+  },
+  {
     id: "followed-promo-telegram-private-space",
     note: "2026-08-22 实测：@Smeme_Tea 关闭评论，以私密空间、免费开放和进裙入口引流到 t.me",
     text: "大家心心念念的私密空间，今天决定要放水了！不用付费，不用绕路，只要今天进群，所有你想要的视频完整版，全部对宝子们免费开放，X上私信的一律不回复哦，点报上私信我 进裙入口：t.me/Smeme_Teb 暗号：（夏日）注：未满18岁，禁止入内！",
