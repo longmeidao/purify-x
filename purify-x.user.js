@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.7.1
+// @version      2.7.2
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -24,7 +24,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.7.1";
+  const VERSION = "2.7.2";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -112,6 +112,7 @@
   const DEFAULT_PREFERENCES = Object.freeze({
     schema: PREFERENCES.schema,
     filterTimeline: false,
+    filterTimelinePromotions: true,
     showAppealButton: true,
   });
   const AI = Object.freeze({
@@ -314,7 +315,7 @@
   // 关闭评论的推广帖常用「回馈粉丝、福利群、完整版、限时免费、唯一链接」
   // 一类话术。它们单独出现并不定罪，必须再结合结构化回复权限和正文外链。
   const PROMOTION_COPY_RE =
-    /(回馈.{0,8}粉丝|反馈.{0,8}粉丝|福利群|分享给粉丝|粉丝.{0,8}(支持|福利|免费|无门槛)|限时.{0,8}(免费|无门槛|进入)|(?:免费|无门槛).{0,12}(进入|进群|观看|完整版|互动)|(?:完整|完整版).{0,8}(视频|写真|互动)|线上\s*1v1|唯一链接|私信暗号|进群方式|下载.{0,8}(纸飞机|飞机|telegram)|永久更新|极品推荐|打开即玩|无限制\s*ai)/i;
+    /(回馈.{0,8}粉丝|反馈.{0,8}粉丝|福利群|分享给粉丝|粉丝.{0,8}(支持|福利|免费|无门槛)|私密空间|不用.{0,3}(付费|收费)|今天.{0,4}进[群裙]|限时.{0,8}(免费|无门槛|进入)|免费.{0,5}开放|(?:免费|无门槛).{0,12}(进入|进[群裙]|观看|完整版|互动)|(?:完整|完整版).{0,8}(视频|写真|互动)|(视频|写真).{0,5}完整版|进[群裙].{0,5}入口|线上\s*1v1|唯一链接|私信暗号|进群方式|下载.{0,8}(纸飞机|飞机|telegram)|永久更新|极品推荐|打开即玩|无限制\s*ai)/i;
 
   const GENERIC_REPLY_RE =
     /^(wow|nice|great|amazing|awesome|beautiful|cute|cool|love it|so true|exactly|interesting|good one|well said|哈哈+|确实|真的|支持|厉害|不错|可以|牛啊|太棒了)[!.。,，！\s\p{Extended_Pictographic}]*$/iu;
@@ -564,6 +565,8 @@
     return {
       schema: PREFERENCES.schema,
       filterTimeline: raw?.filterTimeline === true,
+      // 新选项默认开启；只有用户明确关闭才停用时间线推广过滤。
+      filterTimelinePromotions: raw?.filterTimelinePromotions !== false,
       // 旧设置没有该字段时保持升级前的可见行为；只有严格 false 才隐藏。
       showAppealButton: raw?.showAppealButton !== false,
     };
@@ -1003,7 +1006,7 @@
     const threadId = statusIdFromLocation();
     const context = threadId
       ? `thread:${threadId}`
-      : isFilterableTimeline()
+      : isFilterableTimeline() || isProfilePostTimeline()
         ? `timeline:${location.pathname}`
         : "";
     return context
@@ -1508,7 +1511,8 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       `内置来源 ${enabledBuiltInSources.size}/${BUILTIN_SOURCE_IDS.length}`,
       `公开账号去重后 ${remoteHandleSources.size}`,
       `本地屏蔽 ${localBlockedHandles.size} · 永远放行 ${localAllowedHandles.size}`,
-      `时间线屏蔽 ${preferences.filterTimeline ? "已启用" : "未启用"}`,
+      `时间线可疑账号 ${preferences.filterTimeline ? "已屏蔽" : "未屏蔽"}`,
+      `时间线推广内容 ${preferences.filterTimelinePromotions ? "已屏蔽" : "未屏蔽"}`,
       `MXGA 申诉按钮 ${preferences.showAppealButton ? "已显示" : "已隐藏"}`,
       `自定义屏蔽词 ${localStrongKeywords.size}`,
       `订阅 ${customSubscriptionUrls.length} · 已载入账号 ${subscribedBlockedHandles.size} · 词 ${subscribedStrongKeywords.size}`,
@@ -1692,6 +1696,9 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const nextAiConfig = aiConfigFromPanel(panel);
     const nextPreferences = sanitizePreferences({
       filterTimeline: panel.querySelector("#xps-filter-timeline")?.checked,
+      filterTimelinePromotions: panel.querySelector(
+        "#xps-filter-timeline-promotions",
+      )?.checked,
       showAppealButton: panel.querySelector("#xps-show-appeal-button")
         ?.checked,
     });
@@ -1798,7 +1805,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             <div class="xps-settings-section-heading">
               <div>
                 <h3>过滤与显示</h3>
-                <p>回复区始终过滤；时间线范围和申诉入口可单独控制。</p>
+                <p>回复区始终过滤；时间线的可疑账号与推广内容分开控制。</p>
               </div>
             </div>
             <div class="xps-source-list">
@@ -1806,8 +1813,16 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
                 <input id="xps-filter-timeline" type="checkbox">
                 <span class="xps-source-check" aria-hidden="true">✓</span>
                 <span class="xps-source-copy">
-                  <span class="xps-source-title">屏蔽时间线中的可疑内容</span>
+                  <span class="xps-source-title">屏蔽时间线中的可疑账号内容</span>
                   <small>默认关闭。开启后仅屏蔽命中账号名单的内容，回复区过滤不受影响。</small>
+                </span>
+              </label>
+              <label class="xps-source-card">
+                <input id="xps-filter-timeline-promotions" type="checkbox">
+                <span class="xps-source-check" aria-hidden="true">✓</span>
+                <span class="xps-source-copy">
+                  <span class="xps-source-title">屏蔽时间线中的推广内容</span>
+                  <small>默认开启。只处理同时命中限制回复、正文外链和推广话术的高置信内容。</small>
                 </span>
               </label>
               <label class="xps-source-card">
@@ -1933,6 +1948,8 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const panel = backdrop.querySelector("#xps-settings-panel");
     panel.querySelector("#xps-filter-timeline").checked =
       preferences.filterTimeline;
+    panel.querySelector("#xps-filter-timeline-promotions").checked =
+      preferences.filterTimelinePromotions;
     panel.querySelector("#xps-show-appeal-button").checked =
       preferences.showAppealButton;
     panel.querySelector("#xps-settings-allow").value =
@@ -3989,6 +4006,22 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     );
   }
 
+  function isProfilePostTimeline(pathname = location.pathname) {
+    const parts = String(pathname || "")
+      .split("/")
+      .filter(Boolean)
+      .map((part) => part.toLowerCase());
+    if (
+      (parts.length !== 1 &&
+        !(parts.length === 2 && parts[1] === "with_replies")) ||
+      !HANDLE_RE.test(parts[0] || "") ||
+      RESERVED_PROFILE_PATHS.has(parts[0])
+    ) {
+      return false;
+    }
+    return true;
+  }
+
   function isProfileMediaPath(pathname = "") {
     const parts = String(pathname || "")
       .split("/")
@@ -4028,17 +4061,20 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
   }
 
   // 用户进入详情页就是为了阅读主贴，因此主贴始终保留；只有下方回复运行完整
-  // 内容与行为规则。时间线仍由独立开关控制，并只把账号名单当作过滤入口。
+  // 内容与行为规则。时间线的账号名单和高置信推广分别由独立开关控制。
   function articleFilterScope({
     mainStatusId = "",
     currentStatusId = "",
     timelineEligible = false,
     filterTimeline = false,
+    filterTimelinePromotions = false,
   } = {}) {
     if (mainStatusId) {
       return currentStatusId === mainStatusId ? "none" : "thread-reply";
     }
-    return timelineEligible && filterTimeline ? "timeline" : "none";
+    return timelineEligible && (filterTimeline || filterTimelinePromotions)
+      ? "timeline"
+      : "none";
   }
 
   function contentPolicyForSurface({
@@ -4046,14 +4082,47 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     primaryAccountListed = false,
     relatedAccountListed = false,
     highConfidencePromotion = false,
+    filterTimelineAccounts = false,
+    filterTimelinePromotions = false,
+    accountTimelineEligible = true,
+    promotionTimelineEligible = true,
   } = {}) {
     if (scope === "thread-reply") return "full";
     if (scope === "timeline") {
-      return primaryAccountListed || relatedAccountListed || highConfidencePromotion
-        ? "account-candidate"
-        : "none";
+      if (
+        promotionTimelineEligible &&
+        filterTimelinePromotions &&
+        highConfidencePromotion
+      ) {
+        return "promotion-candidate";
+      }
+      if (
+        accountTimelineEligible &&
+        filterTimelineAccounts &&
+        (primaryAccountListed || relatedAccountListed)
+      ) {
+        return "account-candidate";
+      }
     }
     return "none";
+  }
+
+  function timelineResultEnabled(
+    result,
+    rawPreferences,
+    {
+      accountTimelineEligible = true,
+      promotionTimelineEligible = true,
+    } = {},
+  ) {
+    return Boolean(
+      (promotionTimelineEligible &&
+        rawPreferences?.filterTimelinePromotions === true &&
+        result?.timelinePromotionCandidate === true) ||
+        (accountTimelineEligible &&
+          rawPreferences?.filterTimeline === true &&
+          result?.timelineAccountCandidate === true),
+    );
   }
 
   function articleStatusId(article) {
@@ -5351,19 +5420,26 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       forgetHiddenStatus(currentStatusId);
       return false;
     }
-    if (
-      !statusIdFromLocation() &&
-      isFilterableTimeline() &&
-      !preferences.filterTimeline
-    ) {
-      forgetHiddenStatus(currentStatusId);
-      return false;
-    }
     const cached = cachedHiddenStatus(currentStatusId);
     if (!cached || restoredFingerprints.has(cached.fingerprint)) {
       if (cached && restoredFingerprints.has(cached.fingerprint)) {
         forgetHiddenStatus(currentStatusId);
       }
+      return false;
+    }
+
+    const accountTimelineEligible = isFilterableTimeline();
+    const promotionTimelineEligible =
+      accountTimelineEligible || isProfilePostTimeline();
+    if (
+      !statusIdFromLocation() &&
+      (accountTimelineEligible || promotionTimelineEligible) &&
+      !timelineResultEnabled(cached.result, preferences, {
+        accountTimelineEligible,
+        promotionTimelineEligible,
+      })
+    ) {
+      forgetHiddenStatus(currentStatusId);
       return false;
     }
 
@@ -5380,7 +5456,9 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         following: viewerFollowingState(article, handle),
         isSelf: Boolean(viewerHandle() && viewerHandle() === handle),
         highConfidencePromotion: Boolean(
-          cached.result?.highConfidencePromotion,
+          promotionTimelineEligible &&
+            preferences.filterTimelinePromotions &&
+            cached.result?.timelinePromotionCandidate,
         ),
       })
     ) {
@@ -5413,11 +5491,16 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
 
     const mainStatusId = statusIdFromLocation();
     const currentStatusId = articleStatusId(article);
+    const accountTimelineEligible = isFilterableTimeline();
+    const promotionTimelineEligible =
+      accountTimelineEligible || isProfilePostTimeline();
     const filterScope = articleFilterScope({
       mainStatusId,
       currentStatusId,
-      timelineEligible: isFilterableTimeline(),
+      timelineEligible:
+        accountTimelineEligible || promotionTimelineEligible,
       filterTimeline: preferences.filterTimeline,
+      filterTimelinePromotions: preferences.filterTimelinePromotions,
     });
     const timelineMode = filterScope === "timeline";
     const handle = articleHandle(article);
@@ -5464,6 +5547,10 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       primaryAccountListed,
       relatedAccountListed: Boolean(quotedAccount),
       highConfidencePromotion: promotion.highConfidence,
+      filterTimelineAccounts: preferences.filterTimeline,
+      filterTimelinePromotions: preferences.filterTimelinePromotions,
+      accountTimelineEligible,
+      promotionTimelineEligible,
     });
     const aiKey = aiDecisionKey(text, name, handle);
     const aiDecision = cachedAiDecision(aiKey);
@@ -5518,7 +5605,8 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     if (
       shouldProtectAuthor({
         following: followingState,
-        highConfidencePromotion: promotion.highConfidence,
+        highConfidencePromotion:
+          contentPolicy === "promotion-candidate",
       })
     ) {
       annotateReplyResult(article, null, handle, userId);
@@ -5599,7 +5687,14 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     if (timelineMode) {
       result = {
         ...result,
-        itemLabel: promotion.highConfidence
+        timelineAccountCandidate: Boolean(
+          accountTimelineEligible &&
+            (primaryAccountListed || quotedAccount),
+        ),
+        timelinePromotionCandidate: Boolean(
+          promotionTimelineEligible && promotion.highConfidence,
+        ),
+        itemLabel: contentPolicy === "promotion-candidate"
           ? "推广内容"
           : "低质量账号内容",
       };
@@ -7325,6 +7420,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             detailNavigationStatusId,
             externalLinkSignals,
             isProfileMediaPath,
+            isProfilePostTimeline,
             keywordMatches,
             mediaPhotosDefaultAction,
             mediaSubtabKind,
@@ -7343,6 +7439,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             shouldProtectAuthor,
             shouldRepairCollapsedMultiImageLayout,
             timelineReturnScrollDelta,
+            timelineResultEnabled,
             timelineReturnSnapshotIsCurrent,
             updateAiLearnedRuleFeedback,
             userIdFromReactUser,

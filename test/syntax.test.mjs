@@ -70,18 +70,27 @@ test("设置界面覆盖键盘焦点和减少动态效果", () => {
   assert.doesNotMatch(source, /@keyframes xps-success-pulse/);
 });
 
-test("时间线屏蔽是默认关闭的独立选项", () => {
+test("可疑账号与推广内容使用两个独立时间线选项", () => {
   const source = fs.readFileSync(SCRIPT_PATH, "utf8");
   assert.match(source, /key: "xps-preferences-v1"/);
   assert.match(
     source,
     /const DEFAULT_PREFERENCES = Object\.freeze\(\{[\s\S]*?filterTimeline: false,/,
   );
-  assert.match(source, /id="xps-filter-timeline" type="checkbox"/);
-  assert.match(source, />屏蔽时间线中的可疑内容</);
   assert.match(
     source,
-    /timelineEligible:\s*isFilterableTimeline\(\),[\s\S]*?filterTimeline:\s*preferences\.filterTimeline/,
+    /const DEFAULT_PREFERENCES = Object\.freeze\(\{[\s\S]*?filterTimelinePromotions: true,/,
+  );
+  assert.match(source, /id="xps-filter-timeline" type="checkbox"/);
+  assert.match(
+    source,
+    /id="xps-filter-timeline-promotions" type="checkbox"/,
+  );
+  assert.match(source, />屏蔽时间线中的可疑账号内容</);
+  assert.match(source, />屏蔽时间线中的推广内容</);
+  assert.match(
+    source,
+    /filterTimeline:\s*preferences\.filterTimeline,[\s\S]*?filterTimelinePromotions:\s*preferences\.filterTimelinePromotions/,
   );
   assert.match(source, /const timelineMode = filterScope === "timeline";/);
   assert.match(
@@ -176,8 +185,9 @@ test("高置信推广缓存重挂载时仍遵守自己与关系未知保护", ()
   const source = fs.readFileSync(SCRIPT_PATH, "utf8");
   assert.match(
     source,
-    /cached\.result\?\.highConfidencePromotion/,
+    /cached\.result\?\.timelinePromotionCandidate/,
   );
+  assert.match(source, /preferences\.filterTimelinePromotions/);
   assert.match(
     source,
     /isSelf:\s*Boolean\(viewerHandle\(\) && viewerHandle\(\) === handle\)/,

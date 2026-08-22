@@ -12,14 +12,40 @@ for (const fixture of surfaceCases) {
   });
 }
 
-test("普通页面与默认关闭的时间线不进入过滤作用域", () => {
+test("两个时间线过滤选项独立决定是否进入时间线作用域", () => {
   assert.equal(api.articleFilterScope(), "none");
   assert.equal(
-    api.articleFilterScope({ timelineEligible: true, filterTimeline: false }),
+    api.articleFilterScope({
+      timelineEligible: true,
+      filterTimeline: false,
+      filterTimelinePromotions: false,
+    }),
     "none",
   );
   assert.equal(
-    api.articleFilterScope({ timelineEligible: true, filterTimeline: true }),
+    api.articleFilterScope({
+      timelineEligible: true,
+      filterTimeline: true,
+      filterTimelinePromotions: false,
+    }),
     "timeline",
+  );
+  assert.equal(
+    api.articleFilterScope({
+      timelineEligible: true,
+      filterTimeline: false,
+      filterTimelinePromotions: true,
+    }),
+    "timeline",
+  );
+});
+
+test("账号主页是推广过滤范围，但详情页主贴仍不是", () => {
+  assert.equal(api.isProfilePostTimeline("/Smeme_Tea"), true);
+  assert.equal(api.isProfilePostTimeline("/Smeme_Tea/with_replies"), true);
+  assert.equal(api.isProfilePostTimeline("/Smeme_Tea/media"), false);
+  assert.equal(
+    api.isProfilePostTimeline("/Smeme_Tea/status/2091023938298216512"),
+    false,
   );
 });

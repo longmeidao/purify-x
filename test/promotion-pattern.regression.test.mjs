@@ -8,6 +8,7 @@ const {
   externalLinkSignals,
   promotionPattern,
   shouldProtectAuthor,
+  timelineResultEnabled,
 } = identityTestApi;
 
 test("从当前 X 推文数据识别 by_invitation 关闭评论", () => {
@@ -98,6 +99,19 @@ test("只有关闭评论、外链、推广话术三者齐全才覆盖已关注�
   );
 });
 
+test("识别不用付费、视频完整版、免费开放和进裙入口变体", () => {
+  const result = promotionPattern(
+    "不用付费，只要今天进群，所有你想要的视频完整版全部免费开放，进裙入口 t.me/Smeme_Teb",
+    {
+      repliesRestricted: true,
+      hasExternalLink: true,
+      telegramLink: true,
+    },
+  );
+  assert.equal(result.promotionCopy, true);
+  assert.equal(result.highConfidence, true);
+});
+
 test("高置信推广只覆盖明确已关注，自己和关系未知仍放行", () => {
   assert.equal(
     shouldProtectAuthor({ following: true, highConfidencePromotion: true }),
@@ -121,23 +135,58 @@ test("高置信推广只覆盖明确已关注，自己和关系未知仍放行",
   );
 });
 
-test("时间线开启后高置信推广不依赖账号先进入公开名单", () => {
+test("高置信推广只受独立推广开关控制", () => {
   assert.equal(
     contentPolicyForSurface({
       scope: "timeline",
       primaryAccountListed: false,
       relatedAccountListed: false,
       highConfidencePromotion: true,
+      filterTimelineAccounts: false,
+      filterTimelinePromotions: true,
     }),
-    "account-candidate",
+    "promotion-candidate",
   );
   assert.equal(
     contentPolicyForSurface({
       scope: "timeline",
-      primaryAccountListed: false,
+      primaryAccountListed: true,
       relatedAccountListed: false,
-      highConfidencePromotion: false,
+      highConfidencePromotion: true,
+      filterTimelineAccounts: false,
+      filterTimelinePromotions: false,
     }),
     "none",
+  );
+});
+
+test("缓存恢复分别遵守可疑账号与推广开关", () => {
+  assert.equal(
+    timelineResultEnabled(
+      { timelinePromotionCandidate: true, timelineAccountCandidate: false },
+      { filterTimeline: false, filterTimelinePromotions: true },
+    ),
+    true,
+  );
+  assert.equal(
+    timelineResultEnabled(
+      { timelinePromotionCandidate: true, timelineAccountCandidate: false },
+      { filterTimeline: true, filterTimelinePromotions: false },
+    ),
+    false,
+  );
+  assert.equal(
+    timelineResultEnabled(
+      { timelinePromotionCandidate: false, timelineAccountCandidate: true },
+      { filterTimeline: false, filterTimelinePromotions: true },
+    ),
+    false,
+  );
+  assert.equal(
+    timelineResultEnabled(
+      { timelinePromotionCandidate: false, timelineAccountCandidate: true },
+      { filterTimeline: true, filterTimelinePromotions: false },
+    ),
+    true,
   );
 });

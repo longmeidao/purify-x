@@ -10,6 +10,19 @@
 
 export const spam = [
   {
+    id: "followed-promo-telegram-private-space",
+    note: "2026-08-22 实测：@Smeme_Tea 关闭评论，以私密空间、免费开放和进裙入口引流到 t.me",
+    text: "大家心心念念的私密空间，今天决定要放水了！不用付费，不用绕路，只要今天进群，所有你想要的视频完整版，全部对宝子们免费开放，X上私信的一律不回复哦，点报上私信我 进裙入口：t.me/Smeme_Teb 暗号：（夏日）注：未满18岁，禁止入内！",
+    name: "夏日么么茶",
+    handle: "Smeme_Tea",
+    options: {
+      repliesRestricted: true,
+      hasExternalLink: true,
+      telegramLink: true,
+    },
+    minScore: 11,
+  },
+  {
     id: "followed-promo-telegram-welfare-group",
     note: "2026-08-22 实测：已关注账号关闭评论，以粉丝回馈和福利群引流到 t.me",
     text: "为了回馈广大粉丝对我的支持！凡是今天进我福利群的将不收取任何费用，24h免费对我的粉丝们限时无门槛进入，可观看所有完整视频和写真噢！私信暗号：谜口 进群电报私 t.me/MixMico",

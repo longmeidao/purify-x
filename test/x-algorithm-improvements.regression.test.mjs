@@ -27,6 +27,7 @@ test("作用域策略把证据与页面动作分开", () => {
     api.contentPolicyForSurface({
       scope: "timeline",
       primaryAccountListed: true,
+      filterTimelineAccounts: true,
     }),
     "account-candidate",
   );
