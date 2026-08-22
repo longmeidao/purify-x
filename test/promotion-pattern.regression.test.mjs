@@ -128,6 +128,26 @@ test("识别不用付费、视频完整版、免费开放和进裙入口变体",
   assert.equal(result.highConfidence, true);
 });
 
+test("限制回复与 Telegram 外链组成高置信组合", () => {
+  const text = "直达链接：http://t.me/ac520_like1";
+  const restricted = promotionPattern(text, {
+    repliesRestricted: true,
+    hasExternalLink: true,
+    telegramLink: true,
+  });
+  assert.equal(restricted.promotionCopy, false);
+  assert.equal(restricted.highConfidence, true);
+
+  assert.equal(
+    promotionPattern(text, {
+      repliesRestricted: false,
+      hasExternalLink: true,
+      telegramLink: true,
+    }).highConfidence,
+    false,
+  );
+});
+
 test("高置信推广只覆盖明确已关注，自己和关系未知仍放行", () => {
   assert.equal(
     shouldProtectAuthor({ following: true, highConfidencePromotion: true }),

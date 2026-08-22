@@ -10,6 +10,19 @@
 
 export const spam = [
   {
+    id: "restricted-telegram-passcode",
+    note: "2026-08-22 实测：@ac520_like 限制回复，以直达 t.me 链接和暗号引流",
+    text: "为了拍出有灵魂的照片，我今天跟路边的环卫大爷互换了三天灵魂🚀 直达链接：http://t.me/ac520_like1 暗号：阿次",
+    name: "阿次（九月档期可安排）",
+    handle: "ac520_like",
+    options: {
+      repliesRestricted: true,
+      hasExternalLink: true,
+      telegramLink: true,
+    },
+    minScore: 8,
+  },
+  {
     id: "followed-promo-telegram-open-replies",
     note: "2026-08-22 实测：@SerenaMotolaYe 开放回复，以粉丝福利和完整版视频引流到 t.me",
     text: "感恩粉丝一路关注！今日专属福利回馈大家～免费进粉丝群，直接解锁过往+近期所有完整版视频、新作及写真集！无门槛 进裙入口：https://t.me/fensifu11（跳转浏览器打开）暗号「野」手慢无～注：未满18岁，禁止入内！",

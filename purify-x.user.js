@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.7.3
+// @version      2.7.4
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -24,7 +24,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.7.3";
+  const VERSION = "2.7.4";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -469,20 +469,28 @@
     return { hasExternalLink, telegramLink };
   }
 
+  function promotionCopySignal(rawText) {
+    return PROMOTION_COPY_RE.test(normalize(rawText));
+  }
+
   function promotionPattern(rawText, options = {}) {
     const repliesRestricted = options.repliesRestricted === true;
     const telegramLink = options.telegramLink === true;
     const hasExternalLink = telegramLink || options.hasExternalLink === true;
-    const promotionCopy = PROMOTION_COPY_RE.test(normalize(rawText));
+    const promotionCopy = promotionCopySignal(rawText);
     const restrictedExternalPromotion =
       repliesRestricted && hasExternalLink && promotionCopy;
     const telegramPromotion = telegramLink && promotionCopy;
+    const restrictedTelegramPromotion = repliesRestricted && telegramLink;
     return {
       repliesRestricted,
       hasExternalLink,
       telegramLink,
       promotionCopy,
-      highConfidence: restrictedExternalPromotion || telegramPromotion,
+      highConfidence:
+        restrictedExternalPromotion ||
+        telegramPromotion ||
+        restrictedTelegramPromotion,
     };
   }
 
@@ -1826,7 +1834,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
                 <span class="xps-source-check" aria-hidden="true">✓</span>
                 <span class="xps-source-copy">
                   <span class="xps-source-title">屏蔽时间线中的推广内容</span>
-                  <small>默认开启。处理 Telegram 外链与推广话术组合；普通外链仍须同时限制回复。</small>
+                  <small>默认开启。限制回复与 Telegram 外链同时出现即可命中；普通外链仍须同时命中推广话术。</small>
                 </span>
               </label>
               <label class="xps-source-card">
@@ -3826,7 +3834,11 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     if (promotion.highConfidence) {
       add(
         2,
-        promotion.repliesRestricted
+        promotion.repliesRestricted &&
+          promotion.telegramLink &&
+          !promotion.promotionCopy
+          ? "限制回复与 Telegram 外链同时出现"
+          : promotion.repliesRestricted
           ? "限制回复、外部链接与推广话术同时出现"
           : "Telegram 外链与推广话术同时出现",
         EVIDENCE_SOURCE.pattern,
@@ -4607,7 +4619,11 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const links = externalLinkSignals(linkValues);
     // React 树遍历只留给已经同时出现外链与推广话术的少数候选帖；普通时间线
     // 不为读取 conversation_control 付额外成本。
-    if (!links.hasExternalLink || !PROMOTION_COPY_RE.test(normalize(rawText))) {
+    const promotionCopy = promotionCopySignal(rawText);
+    if (
+      !links.hasExternalLink ||
+      (!links.telegramLink && !promotionCopy)
+    ) {
       return { ...links, repliesRestricted: false, policy: "" };
     }
     const restriction = conversationReplyRestrictionFromReactObjects(
