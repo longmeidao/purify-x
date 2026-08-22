@@ -1,10 +1,14 @@
 // ==UserScript==
-// @name         X 回复净化器
+// @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      1.14.0
-// @description  净化 X/Twitter 回复区的引流、诈骗与批量垃圾回复；自动同步公开名单，始终放行已关注账号。
+// @version      2.7.1
+// @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
+// @homepageURL  https://github.com/longmeidao/purify-x
+// @supportURL   https://github.com/longmeidao/purify-x/issues
+// @updateURL    https://raw.githubusercontent.com/longmeidao/purify-x/main/purify-x.user.js
+// @downloadURL  https://raw.githubusercontent.com/longmeidao/purify-x/main/purify-x.user.js
 // @match        https://x.com/*
 // @match        https://twitter.com/*
 // @run-at       document-idle
@@ -20,7 +24,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "1.14.0";
+  const VERSION = "2.7.1";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -31,6 +35,31 @@
     burstWindowMs: 10 * 1000,
     burstMinReplies: 6,
     burstMinHandles: 4,
+    // 跨账号模板复用检测：归一化后至少这么长才参与比对，避免把
+    // 「确实」「哈哈哈」这类正常复读当成批量模板。
+    templateMinChars: 8,
+    // 归一化文本里不重复字符的占比下限。叠词祝福（恭喜恭喜恭喜恭喜、
+    // 生日快乐生日快乐）占比低，普通长句和垃圾模板占比高。
+    templateMinUniqueRatio: 0.6,
+    // 同一段文本至少出现在这么多个不同账号下才算模板复用。
+    templateMinHandles: 2,
+    // CJK 近似模板只比较较长文本的三字片段，避免把同一话题的短回复
+    // 聚成一组；倒排索引代替全量两两比较。
+    templateNearMinCjkChars: 12,
+    templateNearNgramSize: 3,
+    templateNearJaccard: 0.65,
+    templateNearMaxPosting: 40,
+    // 当前详情页只保留最近观察到的有限记录，跨虚拟列表回收延续行为证据。
+    behaviorMaxRecords: 500,
+    // X 的新多图轮播偶尔会漏掉满宽 class，在 Zen/Firefox 中只剩边框宽度。
+    // 只修复明确塌缩且父容器仍有正常宽度的多图节点，避免干预正常布局。
+    mediaCollapsedMaxWidthPx: 4,
+    mediaParentMinWidthPx: 160,
+    // 返回时间线时用点击前的推文作为滚动锚点。只在短时间内、同一 URL
+    // 的浏览器回退中纠偏，并给 X 留出恢复虚拟列表的时间。
+    timelineReturnMaxAgeMs: 30 * 60 * 1000,
+    timelineReturnTolerancePx: 2,
+    timelineReturnRestoreDelaysMs: Object.freeze([40, 120, 300, 650, 1200]),
     remoteUpdateMs: 6 * 60 * 60 * 1000,
     remoteRetryMs: 30 * 60 * 1000,
     debug: false,
@@ -76,6 +105,15 @@
     maxSubscriptions: 20,
     maxSubscriptionChars: 2 * 1024 * 1024,
   });
+  const PREFERENCES = Object.freeze({
+    key: "xps-preferences-v1",
+    schema: 1,
+  });
+  const DEFAULT_PREFERENCES = Object.freeze({
+    schema: PREFERENCES.schema,
+    filterTimeline: false,
+    showAppealButton: true,
+  });
   const AI = Object.freeze({
     configKey: "xps-ai-config-v1",
     stateKey: "xps-ai-state-v1",
@@ -86,6 +124,8 @@
     maxDecisions: 500,
     normalTtlMs: 30 * 24 * 60 * 60 * 1000,
     spamTtlMs: 180 * 24 * 60 * 60 * 1000,
+    learnedRuleTtlMs: 90 * 24 * 60 * 60 * 1000,
+    learnedRuleDisableAfterFalsePositives: 3,
     failureCooldownMs: 10 * 60 * 1000,
     timeoutMs: 30_000,
   });
@@ -174,6 +214,11 @@
     categoryShift: 4,
     categoryMask: 0b111 << 4,
   });
+  const MXGA_SOURCE_AND_FLAGS_MASK =
+    REMOTE_SOURCE.mxga |
+    MXGA_FLAG.autoTier |
+    MXGA_FLAG.porn |
+    MXGA_FLAG.categoryMask;
   const MXGA_CATEGORY_CODES = Object.freeze(["p", "c", "g", "r", "m", "o"]);
   const MXGA_CATEGORY_LABEL = Object.freeze({
     p: "色情",
@@ -189,6 +234,7 @@
     tweetText: '[data-testid="tweetText"]',
     userName: '[data-testid="User-Name"]',
     profileUserName: '[data-testid="UserName"]',
+    socialContext: '[data-testid="socialContext"]',
   });
 
   const CLASS = Object.freeze({
@@ -200,6 +246,7 @@
     groupTail: "xps-group-tail",
     groupOpen: "xps-group-open",
     accountBadge: "xps-account-badge",
+    mediaWidthFix: "xps-media-width-fix",
   });
 
   const ATTRIBUTE = Object.freeze({
@@ -209,6 +256,7 @@
     group: "data-xps-group",
     state: "data-xps-state",
     cellStatus: "data-xps-status-id",
+    mediaStatus: "data-xps-media-status",
   });
 
   const EVIDENCE_SOURCE = Object.freeze({
@@ -263,6 +311,11 @@
   const CONTACT_RE =
     /(^|[^a-z])(vx|v信|微\s*信全国q|telegram|tg|电报|line|whats\s*app|飞机号|群号|加\s*v)([^a-z]|$)/i;
 
+  // 关闭评论的推广帖常用「回馈粉丝、福利群、完整版、限时免费、唯一链接」
+  // 一类话术。它们单独出现并不定罪，必须再结合结构化回复权限和正文外链。
+  const PROMOTION_COPY_RE =
+    /(回馈.{0,8}粉丝|反馈.{0,8}粉丝|福利群|分享给粉丝|粉丝.{0,8}(支持|福利|免费|无门槛)|限时.{0,8}(免费|无门槛|进入)|(?:免费|无门槛).{0,12}(进入|进群|观看|完整版|互动)|(?:完整|完整版).{0,8}(视频|写真|互动)|线上\s*1v1|唯一链接|私信暗号|进群方式|下载.{0,8}(纸飞机|飞机|telegram)|永久更新|极品推荐|打开即玩|无限制\s*ai)/i;
+
   const GENERIC_REPLY_RE =
     /^(wow|nice|great|amazing|awesome|beautiful|cute|cool|love it|so true|exactly|interesting|good one|well said|哈哈+|确实|真的|支持|厉害|不错|可以|牛啊|太棒了)[!.。,，！\s\p{Extended_Pictographic}]*$/iu;
 
@@ -273,6 +326,10 @@
   // 精确关键词；完整句式本身高度稳定，单独命中即可隐藏。
   const NETWORK_PROMO_TEMPLATE_RE =
     /(她太涩了[a-z]{0,3}\s*我真顶不住|(?:30\+\s*的?)?(?:sao|骚)货[a-z]{0,3}\s*没人比她(?:sao|骚)|比她好看的.{0,4}没她骚.{0,6}比她骚的.{0,4}没她好看|体制内老师.{0,10}(?:sao|骚)的很|刷了半天.{0,10}(?:的)?x.{0,10}就她(?:的)?主页能打(?:✈️?|飞机)了|30\+\s*果然太涩了.{0,8}我真顶不住|30\+\s*的.{0,6}体制内老师.{0,12}玩的就是返差)/i;
+
+  // \u6C49\u5B57\u2014emoji\u2014\u6C49\u5B57\uFF1Aemoji \u88AB\u786C\u63D2\u5728\u8BED\u53E5\u4E2D\u95F4\uFF0C\u4E24\u4FA7\u6CA1\u6709\u6807\u70B9\u6216\u7A7A\u683C\u3002
+  const MID_SENTENCE_EMOJI_RE =
+    /\p{Script=Han}[\p{Extended_Pictographic}\uFE0E\uFE0F\u200D]+\p{Script=Han}/u;
 
   const ZERO_WIDTH_RE = /[\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g;
   const EMOJI_RE = /\p{Extended_Pictographic}/gu;
@@ -285,7 +342,10 @@
   const filteredCells = new Set();
   const expandedGroupIds = new Set();
   const remoteHandleSources = new Map();
+  const remoteUserIdSources = new Map();
+  const remoteHandleUserIds = new Map();
   const remoteWhitelist = new Set();
+  const remoteWhitelistUserIds = new Set();
   const localBlockedHandles = new Set();
   const localAllowedHandles = new Set();
   const localStrongKeywords = new Set();
@@ -293,9 +353,9 @@
   const subscribedAllowedHandles = new Set();
   const subscribedStrongKeywords = new Set();
   const remoteCommunityKeywords = new Set();
-  const aiLearnedKeywords = new Set();
   let customSubscriptionUrls = [];
   let enabledBuiltInSources = new Set(DEFAULT_BUILTIN_SOURCES);
+  let preferences = { ...DEFAULT_PREFERENCES };
   let customSubscriptionCache = {
     schema: LOCAL_LISTS.schema,
     lastAttemptAt: 0,
@@ -303,7 +363,11 @@
     sources: {},
   };
   const relationshipArticleCache = new WeakMap();
+  const repostRelationshipCache = new WeakMap();
+  const quotedIdentityCache = new WeakMap();
   const relationshipHandleCache = new Map();
+  let scanReactRootsCache = new WeakMap();
+  const profileUserIdCache = new Map();
   const unknownFollowingChecks = new WeakMap();
   let remoteRules = [];
   let remoteCache = {
@@ -316,11 +380,19 @@
   let pendingTimer = 0;
   let followingRetryTimer = 0;
   let observer;
+  let timelineReturnSnapshot = null;
+  let timelineReturnRestoreToken = 0;
+  let timelineReturnInteractionCleanup = null;
+  let mediaPhotosDefaultPending = false;
+  let mediaPhotosMenuRequested = false;
   let hiddenCount = 0;
   let revealAll = false;
   let knownViewerHandle = "";
   let coordinatedBurstStatusIds = new Set();
   let repeatedLowInfoStatusIds = new Set();
+  let duplicateTemplateStatusIds = new Set();
+  const threadBehaviorRecordCache = new Map();
+  let threadBehaviorContextId = "";
   let aiConfig = { ...DEFAULT_AI_CONFIG };
   let aiState = {
     schema: AI.schema,
@@ -340,6 +412,9 @@
   let decisionCacheRevision = "";
   let decisionCacheReady = false;
   let decisionCacheSaveTimer = 0;
+  let aiStateSaveTimer = 0;
+  const aiRuleHitStatusKeys = new Map();
+  const aiRuleFalsePositiveStatusKeys = new Map();
 
   function normalize(value) {
     return String(value || "")
@@ -358,6 +433,107 @@
       .trim()
       .replace(/^@/, "")
       .toLowerCase();
+  }
+
+  function externalLinkSignals(rawValues) {
+    const values = Array.isArray(rawValues) ? rawValues : [rawValues];
+    let hasExternalLink = false;
+    let telegramLink = false;
+
+    for (const rawValue of values) {
+      const compact = normalize(rawValue).replace(/\s+/g, "");
+      if (!compact) continue;
+      if (/(?:^|https?:\/\/|\b)(?:www\.)?(?:t\.me|telegram\.me|telegram\.org)(?:[\/:]|$)/i.test(compact)) {
+        telegramLink = true;
+        hasExternalLink = true;
+      }
+      if (!/^https?:\/\//i.test(compact)) continue;
+      try {
+        const hostname = new URL(compact).hostname.toLowerCase();
+        if (
+          hostname &&
+          hostname !== "x.com" &&
+          !hostname.endsWith(".x.com") &&
+          hostname !== "twitter.com" &&
+          !hostname.endsWith(".twitter.com")
+        ) {
+          hasExternalLink = true;
+        }
+      } catch {
+        // 可见文本可能把协议和域名换行；Telegram 已在上面按紧凑文本识别。
+      }
+    }
+
+    return { hasExternalLink, telegramLink };
+  }
+
+  function promotionPattern(rawText, options = {}) {
+    const repliesRestricted = options.repliesRestricted === true;
+    const telegramLink = options.telegramLink === true;
+    const hasExternalLink = telegramLink || options.hasExternalLink === true;
+    const promotionCopy = PROMOTION_COPY_RE.test(normalize(rawText));
+    return {
+      repliesRestricted,
+      hasExternalLink,
+      telegramLink,
+      promotionCopy,
+      highConfidence: repliesRestricted && hasExternalLink && promotionCopy,
+    };
+  }
+
+  function shouldProtectAuthor({
+    following = null,
+    isSelf = false,
+    highConfidencePromotion = false,
+  } = {}) {
+    return Boolean(
+      isSelf ||
+        following === null ||
+        (following === true && !highConfidencePromotion),
+    );
+  }
+
+  function normalizeKeywordText(value) {
+    return normalize(value)
+      .normalize("NFKD")
+      .replace(/\p{M}/gu, "");
+  }
+
+  function escapeRegExp(value) {
+    return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  }
+
+  function keywordMatches(rawText, rawKeyword) {
+    const text = normalizeKeywordText(rawText);
+    const keyword = normalizeKeywordText(rawKeyword);
+    if (!text || !keyword) return false;
+
+    if (keyword.startsWith("domain:")) {
+      const domain = keyword.slice(7).replace(/^www\./, "");
+      if (!/^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/i.test(domain)) return false;
+      const domainRe = new RegExp(
+        `(?:^|[^a-z0-9-])(?:www\\.)?${escapeRegExp(domain)}(?=[:/\\s]|$)`,
+        "i",
+      );
+      return domainRe.test(text);
+    }
+
+    if (/^[@#][a-z0-9_]{1,64}$/i.test(keyword)) {
+      const marker = keyword[0];
+      const value = keyword.slice(1);
+      return new RegExp(
+        `(?:^|[^a-z0-9_])${escapeRegExp(marker)}${escapeRegExp(value)}(?=$|[^a-z0-9_])`,
+        "i",
+      ).test(text);
+    }
+
+    if (/^[a-z0-9_]+$/i.test(keyword)) {
+      return new RegExp(
+        `(?:^|[^a-z0-9_])${escapeRegExp(keyword)}(?=$|[^a-z0-9_])`,
+        "i",
+      ).test(text);
+    }
+    return text.includes(keyword);
   }
 
   function errorMessage(error) {
@@ -382,6 +558,29 @@
     } catch {
       return false;
     }
+  }
+
+  function sanitizePreferences(raw) {
+    return {
+      schema: PREFERENCES.schema,
+      filterTimeline: raw?.filterTimeline === true,
+      // 旧设置没有该字段时保持升级前的可见行为；只有严格 false 才隐藏。
+      showAppealButton: raw?.showAppealButton !== false,
+    };
+  }
+
+  async function persistPreferences(raw, write = gmSetValue) {
+    const value = sanitizePreferences(raw);
+    return {
+      saved: await write(PREFERENCES.key, value),
+      value,
+    };
+  }
+
+  async function initializePreferences() {
+    preferences = sanitizePreferences(
+      await gmGetValue(PREFERENCES.key, DEFAULT_PREFERENCES),
+    );
   }
 
   function sanitizeAiEndpoint(value) {
@@ -430,7 +629,7 @@
     return "";
   }
 
-  function sanitizeAiState(raw) {
+  function sanitizeAiState(raw, now = Date.now()) {
     const learnedRules = [];
     const seenRules = new Set();
     for (const item of Array.isArray(raw?.learnedRules)
@@ -438,14 +637,29 @@
       : []) {
       const value = sanitizeAiLearnedValue(item?.value);
       if (!value || seenRules.has(value)) continue;
+      const category = String(item?.category || "spam").slice(0, 48);
+      const createdAt = Number(item?.createdAt) || now;
+      const manual = category === "manual";
+      const expiresAt = manual
+        ? 0
+        : Number(item?.expiresAt) || createdAt + AI.learnedRuleTtlMs;
+      if (!manual && expiresAt <= now) continue;
       seenRules.add(value);
       learnedRules.push({
         id: String(item?.id || `ai-${Date.now()}-${learnedRules.length}`),
         value,
-        category: String(item?.category || "spam").slice(0, 48),
+        category,
         reasoning: String(item?.reasoning || "").slice(0, 240),
         sourceHandle: normalizeHandle(item?.sourceHandle),
-        createdAt: Number(item?.createdAt) || Date.now(),
+        createdAt,
+        expiresAt,
+        lastHitAt: Number(item?.lastHitAt) || createdAt,
+        hitCount: Math.max(0, Number.parseInt(item?.hitCount, 10) || 0),
+        falsePositiveCount: Math.max(
+          0,
+          Number.parseInt(item?.falsePositiveCount, 10) || 0,
+        ),
+        lastFalsePositiveAt: Number(item?.lastFalsePositiveAt) || 0,
         enabled: item?.enabled !== false,
       });
     }
@@ -456,7 +670,7 @@
         ? raw.decisions
         : {},
     )
-      .filter(([, item]) => Number(item?.expiresAt) > Date.now())
+      .filter(([, item]) => Number(item?.expiresAt) > now)
       .slice(-AI.maxDecisions);
     for (const [key, item] of entries) {
       decisions[String(key).slice(0, 80)] = {
@@ -483,19 +697,118 @@
     };
   }
 
+  function updateAiLearnedRuleFeedback(
+    rules,
+    rawValues,
+    kind,
+    now = Date.now(),
+  ) {
+    const values = new Set(
+      (rawValues || []).map((value) => sanitizeAiLearnedValue(value)).filter(Boolean),
+    );
+    const disabledValues = [];
+    let changed = false;
+    const nextRules = (rules || []).map((rawRule) => {
+      const rule = { ...rawRule };
+      if (!values.has(rule.value)) return rule;
+      if (kind === "hit") {
+        rule.hitCount = Math.max(0, Number(rule.hitCount) || 0) + 1;
+        rule.lastHitAt = now;
+        if (rule.category !== "manual") {
+          rule.expiresAt = now + AI.learnedRuleTtlMs;
+        }
+        changed = true;
+      } else if (kind === "false-positive") {
+        rule.falsePositiveCount =
+          Math.max(0, Number(rule.falsePositiveCount) || 0) + 1;
+        rule.lastFalsePositiveAt = now;
+        if (
+          rule.enabled !== false &&
+          rule.category !== "manual" &&
+          rule.falsePositiveCount >=
+            AI.learnedRuleDisableAfterFalsePositives
+        ) {
+          rule.enabled = false;
+          disabledValues.push(rule.value);
+        }
+        changed = true;
+      }
+      return rule;
+    });
+    return { rules: nextRules, disabledValues, changed };
+  }
+
   function applyAiState(raw) {
     aiState = sanitizeAiState(raw);
-    aiLearnedKeywords.clear();
-    if (aiConfig.enabled) {
-      for (const rule of aiState.learnedRules) {
-        if (rule.enabled) aiLearnedKeywords.add(rule.value);
-      }
-    }
     invalidateDecisionCache();
   }
 
   async function saveAiState() {
     return gmSetValue(AI.stateKey, aiState);
+  }
+
+  function scheduleAiStateSave() {
+    if (typeof window === "undefined") return;
+    window.clearTimeout(aiStateSaveTimer);
+    aiStateSaveTimer = window.setTimeout(() => {
+      void saveAiState();
+    }, 800);
+  }
+
+  function rememberBoundedKey(cache, key, maxEntries = 2000) {
+    if (!key || cache.has(key)) return false;
+    cache.set(key, Date.now());
+    while (cache.size > maxEntries) {
+      cache.delete(cache.keys().next().value);
+    }
+    return true;
+  }
+
+  function recordAiLearnedRuleHits(values, statusId = "") {
+    const normalizedValues = [...new Set(values || [])].filter(Boolean);
+    if (normalizedValues.length === 0) return false;
+    const key = `${statusId || "no-status"}:${normalizedValues.sort().join("|")}`;
+    if (!rememberBoundedKey(aiRuleHitStatusKeys, key)) return false;
+    const update = updateAiLearnedRuleFeedback(
+      aiState.learnedRules,
+      normalizedValues,
+      "hit",
+    );
+    if (!update.changed) return false;
+    aiState.learnedRules = update.rules;
+    scheduleAiStateSave();
+    return true;
+  }
+
+  function recordAiFalsePositiveFeedback(result, statusId = "") {
+    const values = [...new Set(result?.learnedRuleHits || [])].filter(Boolean);
+    if (values.length === 0) return [];
+    const aiLearnedPoints = (result.evidence || [])
+      .filter(
+        (item) =>
+          item?.source === EVIDENCE_SOURCE.ai &&
+          String(item?.reason || "").includes("学习规则"),
+      )
+      .reduce((total, item) => total + (Number(item?.points) || 0), 0);
+    // 只有移除学习规则分数后本应放行，才把这次恢复归因到 AI 规则。
+    if (aiLearnedPoints <= 0 || result.score - aiLearnedPoints >= CONFIG.threshold) {
+      return [];
+    }
+    const key = `${statusId || "no-status"}:${values.sort().join("|")}`;
+    if (!rememberBoundedKey(aiRuleFalsePositiveStatusKeys, key)) return [];
+    const update = updateAiLearnedRuleFeedback(
+      aiState.learnedRules,
+      values,
+      "false-positive",
+    );
+    if (!update.changed) return [];
+    aiState.learnedRules = update.rules;
+    if (update.disabledValues.length > 0) {
+      applyAiState(aiState);
+      if (typeof document !== "undefined") scheduleScan();
+    }
+    scheduleAiStateSave();
+    return update.disabledValues;
   }
 
   function todayKey() {
@@ -527,6 +840,8 @@
           value?.version || "",
           Number(value?.updatedAt) || 0,
           value?.handles?.length || 0,
+          value?.userIds?.filter(Boolean).length || 0,
+          value?.whitelistUserIds?.filter(Boolean).length || 0,
           value?.rules?.length || value?.keywords?.length || 0,
         ],
       ]),
@@ -551,7 +866,12 @@
         ai: {
           enabled: aiConfig.enabled,
           rules: aiState.learnedRules
-            .filter((rule) => rule.enabled)
+            .filter(
+              (rule) =>
+                rule.enabled &&
+                (rule.category === "manual" ||
+                  Number(rule.expiresAt) > Date.now()),
+            )
             .map((rule) => rule.value)
             .sort(),
         },
@@ -618,20 +938,37 @@
     text,
     name,
     handle,
+    userId,
     coordinatedBurst,
     repeatedLowInfo,
+    duplicateTemplate,
+    repliesRestricted,
+    hasExternalLink,
+    telegramLink,
     tweetsTranslated,
     aiDecision,
+    quotedAccount,
   }) {
     if (!statusId) return "";
     return [
       decisionCacheRevision,
       statusId,
-      stableHash(`${normalize(text)}\n${normalize(name)}\n${handle}`),
+      stableHash(
+        `${normalize(text)}\n${normalize(name)}\n${handle}\n${normalizeUserId(userId)}`,
+      ),
       coordinatedBurst ? 1 : 0,
       repeatedLowInfo ? 1 : 0,
+      duplicateTemplate ? 1 : 0,
+      repliesRestricted ? 1 : 0,
+      hasExternalLink ? 1 : 0,
+      telegramLink ? 1 : 0,
       tweetsTranslated ? 1 : 0,
       aiDecision?.isSpam ? 1 : 0,
+      stableHash(
+        quotedAccount
+          ? `${quotedAccount.handle}:${quotedAccount.userId}:${quotedAccount.points}:${quotedAccount.sources?.join(",")}`
+          : "",
+      ),
     ].join(":");
   }
 
@@ -639,7 +976,10 @@
     if (!key) return null;
     const cached = decisionCache.get(key);
     if (!cached) return null;
-    if (Date.now() - cached.createdAt > DECISION_CACHE.ttlMs) {
+    if (
+      Date.now() - cached.createdAt > DECISION_CACHE.ttlMs ||
+      resultUsesInactiveAiLearnedRule(cached.result)
+    ) {
       decisionCache.delete(key);
       return null;
     }
@@ -676,6 +1016,10 @@
     if (!key) return null;
     const cached = hiddenStatusCache.get(key);
     if (!cached) return null;
+    if (resultUsesInactiveAiLearnedRule(cached.result)) {
+      hiddenStatusCache.delete(key);
+      return null;
+    }
     // Refresh insertion order so this short-lived DOM cache is also LRU.
     hiddenStatusCache.delete(key);
     hiddenStatusCache.set(key, cached);
@@ -704,6 +1048,23 @@
     return `${normalizeHandle(handle)}:${stableHash(
       `${normalize(text)}\n${normalize(name)}`,
     )}`;
+  }
+
+  function aiLearnedRuleIsActive(value, now = Date.now()) {
+    return aiState.learnedRules.some(
+      (rule) =>
+        rule.value === value &&
+        rule.enabled !== false &&
+        (rule.category === "manual" || Number(rule.expiresAt) > now),
+    );
+  }
+
+  function resultUsesInactiveAiLearnedRule(result, now = Date.now()) {
+    const hits = result?.learnedRuleHits;
+    return Boolean(
+      Array.isArray(hits) &&
+        hits.some((value) => !aiLearnedRuleIsActive(value, now)),
+    );
   }
 
   function cachedAiDecision(key) {
@@ -855,16 +1216,21 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       );
       aiState.learnedRules.shift();
     }
+    const now = Date.now();
     aiState.learnedRules.push({
-      id: `ai-${Date.now()}-${stableHash(value)}`,
+      id: `ai-${now}-${stableHash(value)}`,
       value,
       category: decision.signature.category || decision.category,
       reasoning: decision.reasoning,
       sourceHandle: normalizeHandle(input.handle),
-      createdAt: Date.now(),
+      createdAt: now,
+      expiresAt: now + AI.learnedRuleTtlMs,
+      lastHitAt: now,
+      hitCount: 1,
+      falsePositiveCount: 0,
+      lastFalsePositiveAt: 0,
       enabled: true,
     });
-    aiLearnedKeywords.add(value);
     invalidateDecisionCache();
     return true;
   }
@@ -920,7 +1286,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       })
       .catch((error) => {
         aiFailures.set(job.key, Date.now());
-        console.warn("[X Reply Purifier] AI evaluation failed", error);
+        console.warn("[Purify X] AI evaluation failed", error);
       })
       .finally(() => {
         pendingAiKeys.delete(job.key);
@@ -1142,11 +1508,13 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       `内置来源 ${enabledBuiltInSources.size}/${BUILTIN_SOURCE_IDS.length}`,
       `公开账号去重后 ${remoteHandleSources.size}`,
       `本地屏蔽 ${localBlockedHandles.size} · 永远放行 ${localAllowedHandles.size}`,
+      `时间线屏蔽 ${preferences.filterTimeline ? "已启用" : "未启用"}`,
+      `MXGA 申诉按钮 ${preferences.showAppealButton ? "已显示" : "已隐藏"}`,
       `自定义屏蔽词 ${localStrongKeywords.size}`,
       `订阅 ${customSubscriptionUrls.length} · 已载入账号 ${subscribedBlockedHandles.size} · 词 ${subscribedStrongKeywords.size}`,
       `AI ${aiConfig.enabled ? "已启用" : "未启用"} · 今日调用 ${aiState.usage.count}/${aiConfig.dailyLimit} · 学习规则 ${aiState.learnedRules.length} · 判定缓存 ${Object.keys(aiState.decisions).length}`,
       `本地回复判定缓存 ${decisionCache.size}/${DECISION_CACHE.maxEntries} · 有效期 7 天`,
-      `当前页面预隐藏缓存 ${hiddenStatusCache.size}/${DECISION_CACHE.maxEntries}`,
+      `近期页面预隐藏缓存 ${hiddenStatusCache.size}/${DECISION_CACHE.maxEntries}`,
       failed ? `有 ${failed} 个订阅最近更新失败，仍保留上次有效数据` : "",
     ]
       .filter(Boolean)
@@ -1165,6 +1533,17 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       .join("\n\n");
   }
 
+  function feedbackIconMarkup(state) {
+    if (state === "loading") {
+      return `
+        <svg class="xps-feedback-spinner" viewBox="0 0 20 20" aria-hidden="true">
+          <circle cx="10" cy="10" r="7" pathLength="100"></circle>
+        </svg>
+      `;
+    }
+    return state === "success" ? "✓" : "!";
+  }
+
   function showToast(message, state = "success") {
     if (typeof document === "undefined") return;
     document.getElementById("xps-toast")?.remove();
@@ -1173,9 +1552,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     toast.dataset.state = state;
     toast.setAttribute("role", "status");
     toast.innerHTML = `
-      <span class="xps-feedback-icon" aria-hidden="true">${
-        state === "success" ? "✓" : state === "loading" ? "↻" : "!"
-      }</span>
+      <span class="xps-feedback-icon" aria-hidden="true">${feedbackIconMarkup(state)}</span>
       <span></span>
     `;
     toast.lastElementChild.textContent = message;
@@ -1194,8 +1571,8 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const feedback = panel?.querySelector("#xps-settings-feedback");
     if (!feedback) return;
     feedback.dataset.state = state;
-    feedback.querySelector(".xps-feedback-icon").textContent =
-      state === "success" ? "✓" : state === "loading" ? "↻" : "!";
+    feedback.querySelector(".xps-feedback-icon").innerHTML =
+      feedbackIconMarkup(state);
     feedback.querySelector(".xps-feedback-message").textContent = message;
     for (const button of panel.querySelectorAll(
       '[data-xps-settings-action="save"], [data-xps-settings-action="update"]',
@@ -1242,6 +1619,11 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
           reasoning: "用户在设置面板中保留或添加",
           sourceHandle: "",
           createdAt: Date.now(),
+          expiresAt: 0,
+          lastHitAt: Date.now(),
+          hitCount: 0,
+          falsePositiveCount: 0,
+          lastFalsePositiveAt: 0,
           enabled: true,
         },
       );
@@ -1308,6 +1690,11 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       return;
     }
     const nextAiConfig = aiConfigFromPanel(panel);
+    const nextPreferences = sanitizePreferences({
+      filterTimeline: panel.querySelector("#xps-filter-timeline")?.checked,
+      showAppealButton: panel.querySelector("#xps-show-appeal-button")
+        ?.checked,
+    });
     if (
       nextAiConfig.enabled &&
       (!nextAiConfig.endpoint || !nextAiConfig.model)
@@ -1325,6 +1712,13 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       "loading",
       update ? "正在保存并更新全部来源…" : "正在保存设置…",
     );
+    const preferenceResult = await persistPreferences(nextPreferences);
+    if (!preferenceResult.saved) {
+      setSettingsFeedback(panel, "error", "偏好设置保存失败，请重试。");
+      return;
+    }
+    preferences = preferenceResult.value;
+    hiddenStatusCache.clear();
     applyLocalLists({
       schema: LOCAL_LISTS.schema,
       block,
@@ -1358,10 +1752,10 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         "success",
         `更新完成：内置来源 ${sourceSuccess}/${enabledBuiltInSources.size}，自定义订阅 ${customResult.successCount}/${customResult.total}`,
       );
-      showToast("回复净化器名单已更新", "success");
+      showToast("Purify X 名单已更新", "success");
     } else {
       setSettingsFeedback(panel, "success", "设置已保存并立即生效。");
-      showToast("回复净化器设置已保存", "success");
+      showToast("Purify X 设置已保存", "success");
     }
     panel.querySelector("#xps-settings-status").textContent =
       `${remoteStatusText()}\n\n${settingsStatusText()}\n\n${subscriptionDetailsText()}`;
@@ -1394,12 +1788,38 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       <section id="xps-settings-panel" role="dialog" aria-modal="true" aria-labelledby="xps-settings-title">
         <header>
           <div>
-            <h2 id="xps-settings-title">X 回复净化器设置</h2>
+            <h2 id="xps-settings-title">Purify X 设置</h2>
             <p>名单、更新、导入导出和个人规则统一在这里管理。</p>
           </div>
           <button type="button" data-xps-settings-action="close" aria-label="关闭">×</button>
         </header>
         <div class="xps-settings-body">
+          <section class="xps-settings-section">
+            <div class="xps-settings-section-heading">
+              <div>
+                <h3>过滤与显示</h3>
+                <p>回复区始终过滤；时间线范围和申诉入口可单独控制。</p>
+              </div>
+            </div>
+            <div class="xps-source-list">
+              <label class="xps-source-card">
+                <input id="xps-filter-timeline" type="checkbox">
+                <span class="xps-source-check" aria-hidden="true">✓</span>
+                <span class="xps-source-copy">
+                  <span class="xps-source-title">屏蔽时间线中的可疑内容</span>
+                  <small>默认关闭。开启后仅屏蔽命中账号名单的内容，回复区过滤不受影响。</small>
+                </span>
+              </label>
+              <label class="xps-source-card">
+                <input id="xps-show-appeal-button" type="checkbox">
+                <span class="xps-source-check" aria-hidden="true">✓</span>
+                <span class="xps-source-copy">
+                  <span class="xps-source-title">显示 MXGA 申诉按钮</span>
+                  <small>默认开启。关闭后只隐藏申诉入口，不影响名单判定、恢复或永久放行。</small>
+                </span>
+              </label>
+            </div>
+          </section>
           <section class="xps-settings-section">
             <div class="xps-settings-section-heading">
               <div>
@@ -1413,7 +1833,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             <div class="xps-settings-section-heading">
               <div>
                 <h3>自定义订阅链接</h3>
-                <p>每行一个 HTTPS URL，每 6 小时更新。只接受本脚本的 XPS JSON v1 格式，不猜测第三方名单结构。</p>
+                <p>每行一个 HTTPS URL，每 6 小时更新。只接受本脚本的 Purify X JSON v1 格式，不猜测第三方名单结构。</p>
               </div>
             </div>
             <textarea id="xps-settings-subscriptions" class="xps-settings-wide-textarea" spellcheck="false" placeholder="https://example.com/x-blocklist.json"></textarea>
@@ -1438,7 +1858,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
               </label>
               <label class="xps-settings-grid-wide">
                 <span>自定义强屏蔽词</span>
-                <small>每行一个字面词组，昵称或回复命中即达到隐藏阈值。</small>
+                <small>每行一个规则；支持字面短语、ASCII 单词边界、@handle、#hashtag 和 domain:example.com。</small>
                 <textarea id="xps-settings-keywords" spellcheck="false"></textarea>
               </label>
             </div>
@@ -1483,7 +1903,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
               </label>
               <label class="xps-settings-grid-wide">
                 <span>本地 AI 学习规则</span>
-                <small>每行一个回复正文字面片段；删除某行并保存即可撤销。AI 不允许学习昵称或账号 ID。</small>
+                <small>每行一个回复正文字面片段；自动规则 90 天未再命中会过期，三次决定性误判会停用；手动添加不自动过期。</small>
                 <textarea id="xps-ai-learned-rules" spellcheck="false"></textarea>
               </label>
             </div>
@@ -1511,6 +1931,10 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       </section>
     `;
     const panel = backdrop.querySelector("#xps-settings-panel");
+    panel.querySelector("#xps-filter-timeline").checked =
+      preferences.filterTimeline;
+    panel.querySelector("#xps-show-appeal-button").checked =
+      preferences.showAppealButton;
     panel.querySelector("#xps-settings-allow").value =
       [...localAllowedHandles].sort().join("\n");
     panel.querySelector("#xps-settings-block").value =
@@ -1586,7 +2010,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     }
     applyCustomSubscriptionCache(customSubscriptionCache);
     if (typeof GM_registerMenuCommand !== "function") return;
-    GM_registerMenuCommand("打开回复净化器设置", openSettingsPanel);
+    GM_registerMenuCommand("打开 Purify X 设置", openSettingsPanel);
   }
 
   function startCustomSubscriptionUpdates() {
@@ -1622,7 +2046,8 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             return;
           }
           const text = String(response.responseText || "");
-          if (text.length > maxChars) {
+          const byteLength = new TextEncoder().encode(text).byteLength;
+          if (text.length > maxChars || byteLength > maxChars) {
             reject(new Error("响应超过安全大小限制"));
             return;
           }
@@ -1649,7 +2074,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
 
   function validateCustomSubscription(raw, requireSchema = false) {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
-      throw new Error("自定义订阅必须是 XPS JSON 对象");
+      throw new Error("自定义订阅必须是 Purify X JSON 对象");
     }
     if (requireSchema && raw.schema !== LOCAL_LISTS.schema) {
       throw new Error(`自定义订阅 schema 必须为 ${LOCAL_LISTS.schema}`);
@@ -1666,7 +2091,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       block: safe.block,
       allow: safe.allow,
       keywords: safe.keywords,
-      format: "XPS JSON v1",
+      format: "Purify X JSON v1",
     };
   }
 
@@ -1838,11 +2263,13 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       raw.count !== undefined &&
       (!Number.isSafeInteger(raw.count) || raw.count !== raw.entries.length)
     ) {
-      notices.push(`声明条数 ${raw.count} 与实际 ${raw.entries.length} 不一致`);
+      throw new Error(
+        `MXGA 声明条数 ${raw.count} 与实际 ${raw.entries.length} 不一致`,
+      );
     }
 
     // 单条坏数据只丢这一条；坏行占比过高才判定整份响应不可信。
-    const codeByHandle = new Map();
+    const entryByHandle = new Map();
     let invalidCount = 0;
     for (const row of entries) {
       if (
@@ -1859,10 +2286,23 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         continue;
       }
       const handle = normalizeHandle(row[1]);
-      const existing = codeByHandle.get(handle);
+      const existing = entryByHandle.get(handle);
+      const userId = row[0];
       // 同一账号重复出现时保留人工确认那条。
-      if (!existing || (existing[2] === "a" && row[2][2] !== "a")) {
-        codeByHandle.set(handle, row[2]);
+      if (!existing) {
+        entryByHandle.set(handle, { userId, code: row[2], idConflict: false });
+      } else {
+        if (existing.userId && userId && existing.userId !== userId) {
+          // 同一 handle 对应多个数字 ID 时不能任选一个；保留 handle
+          // 回退能力，但丢弃有冲突的 ID。
+          existing.userId = "";
+          existing.idConflict = true;
+        } else if (!existing.idConflict && !existing.userId && userId) {
+          existing.userId = userId;
+        }
+        if (existing.code[2] === "a" && row[2][2] !== "a") {
+          existing.code = row[2];
+        }
       }
     }
 
@@ -1874,8 +2314,8 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         `MXGA 名单无效条目过多（${invalidCount}/${entries.length}）`,
       );
     }
-    if (codeByHandle.size < REMOTE.minEntries) {
-      throw new Error(`MXGA 名单数量异常（${codeByHandle.size}）`);
+    if (entryByHandle.size < REMOTE.minEntries) {
+      throw new Error(`MXGA 名单数量异常（${entryByHandle.size}）`);
     }
 
     const rules = [];
@@ -1909,14 +2349,15 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         typeof raw.version === "string" && raw.version
           ? raw.version
           : undefined,
-      handles: [...codeByHandle.keys()],
-      codes: [...codeByHandle.values()],
+      handles: [...entryByHandle.keys()],
+      userIds: [...entryByHandle.values()].map((entry) => entry.userId),
+      codes: [...entryByHandle.values()].map((entry) => entry.code),
       rules,
       notice: notices.join("；"),
     };
   }
 
-  function validateMxgaWhitelist(raw, previous = []) {
+  function validateMxgaWhitelist(raw, previous = { handles: [], userIds: [] }) {
     const list = Array.isArray(raw)
       ? raw
       : Array.isArray(raw?.list)
@@ -1928,7 +2369,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     }
 
     // 白名单是误杀保护：坏行只丢自己，不能因为一条脏数据整份作废。
-    const handles = [];
+    const identities = new Map();
     for (const row of list) {
       const handle =
         row && typeof row === "object"
@@ -1942,12 +2383,27 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       ) {
         continue;
       }
-      handles.push(handle);
+      const existing = identities.get(handle);
+      if (!existing) {
+        identities.set(handle, { userId: uid, conflict: false });
+      } else if (
+        existing.userId &&
+        uid &&
+        existing.userId !== uid
+      ) {
+        existing.userId = "";
+        existing.conflict = true;
+      } else if (!existing.conflict && !existing.userId && uid) {
+        existing.userId = uid;
+      }
     }
 
     // 服务端异常返回空数组时同样不能清空已有缓存。
-    if (handles.length === 0 && previous.length > 0) return previous;
-    return [...new Set(handles)];
+    if (identities.size === 0 && previous.handles.length > 0) return previous;
+    return {
+      handles: [...identities.keys()],
+      userIds: [...identities.values()].map((entry) => entry.userId),
+    };
   }
 
   // GitHub 镜像（data/blacklist、data/whitelist）字段随上游演进，
@@ -2055,6 +2511,15 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return [...new Set(result)];
   }
 
+  function sanitizeAlignedUserIds(raw, expectedLength) {
+    if (!Array.isArray(raw) || raw.length !== expectedLength) return [];
+    return raw.every(
+      (value) => typeof value === "string" && (value === "" || /^\d{1,32}$/.test(value)),
+    )
+      ? raw.slice()
+      : [];
+  }
+
   function sanitizeStoredRules(raw) {
     if (!Array.isArray(raw) || raw.length > REMOTE.maxRules) return [];
     return raw.filter(
@@ -2088,6 +2553,14 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         lastError: String(mxga.lastError || ""),
         notice: String(mxga.notice || ""),
       };
+      safe.sources.mxga.userIds = sanitizeAlignedUserIds(
+        mxga.userIds,
+        safe.sources.mxga.handles.length,
+      );
+      safe.sources.mxga.whitelistUserIds = sanitizeAlignedUserIds(
+        mxga.whitelistUserIds,
+        safe.sources.mxga.whitelist.length,
+      );
       // codes 与 handles 一一对应；长度对不上（旧缓存或写坏了）就整体
       // 按未知 tier 处理，宁可少一层降权也不要错配到别的账号头上。
       const codes = Array.isArray(mxga.codes) ? mxga.codes : [];
@@ -2125,9 +2598,67 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     remoteHandleSources.set(handle, sources | sourceBit | flags);
   }
 
+  function addRemoteUserId(userId, sourceBit, flags = 0) {
+    if (!/^\d{1,32}$/.test(userId)) return;
+    const sources = remoteUserIdSources.get(userId) || 0;
+    remoteUserIdSources.set(userId, sources | sourceBit | flags);
+  }
+
+  function reconcileIdentitySourceBits({
+    userId = "",
+    idBits = 0,
+    handleBits = 0,
+    listedUserId = "",
+    whitelisted = false,
+  }) {
+    if (whitelisted) {
+      return { sourceBits: 0, whitelisted: true, idConflict: false };
+    }
+    if (!userId) {
+      return { sourceBits: handleBits, whitelisted: false, idConflict: false };
+    }
+    const idConflict = Boolean(listedUserId && listedUserId !== userId);
+    return {
+      sourceBits:
+        idBits |
+        (idConflict
+          ? handleBits & ~MXGA_SOURCE_AND_FLAGS_MASK
+          : handleBits),
+      whitelisted: false,
+      idConflict,
+    };
+  }
+
+  function identitySourceBits(rawUserId, rawHandle) {
+    const userId = /^\d{1,32}$/.test(String(rawUserId || ""))
+      ? String(rawUserId)
+      : "";
+    const handle = normalizeHandle(rawHandle);
+    const whitelisted = Boolean(
+      (userId && remoteWhitelistUserIds.has(userId)) ||
+      (handle && remoteWhitelist.has(handle))
+    );
+
+    const idBits = userId ? remoteUserIdSources.get(userId) || 0 : 0;
+    const handleBits = handle ? remoteHandleSources.get(handle) || 0 : 0;
+    const listedUserId = handle ? remoteHandleUserIds.get(handle) || "" : "";
+    // Twitter Block Porn 只有 handle；即使 MXGA 的 handle 已被另一个 ID
+    // 复用，也只剥掉 MXGA 及其 flags，不影响另一个独立来源。
+    return reconcileIdentitySourceBits({
+      userId,
+      idBits,
+      handleBits,
+      listedUserId,
+      whitelisted,
+    });
+  }
+
   function applyRemoteCache(cache, { rescan = true } = {}) {
     remoteHandleSources.clear();
+    remoteUserIdSources.clear();
+    remoteHandleUserIds.clear();
     remoteWhitelist.clear();
+    remoteWhitelistUserIds.clear();
     remoteRules = [];
     remoteCommunityKeywords.clear();
 
@@ -2135,14 +2666,31 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     if (mxga && enabledBuiltInSources.has(BUILTIN_SOURCE.mxga)) {
       const codes = Array.isArray(mxga.codes) ? mxga.codes : [];
       const aligned = codes.length === mxga.handles.length;
+      const userIds = Array.isArray(mxga.userIds) ? mxga.userIds : [];
+      const idsAligned = userIds.length === mxga.handles.length;
       mxga.handles.forEach((handle, index) => {
+        const flags = aligned ? mxgaCodeFlags(codes[index]) : 0;
         addRemoteHandle(
           handle,
           REMOTE_SOURCE.mxga,
-          aligned ? mxgaCodeFlags(codes[index]) : 0,
+          flags,
         );
+        const userId = idsAligned ? userIds[index] : "";
+        if (userId) {
+          addRemoteUserId(userId, REMOTE_SOURCE.mxga, flags);
+          remoteHandleUserIds.set(handle, userId);
+        }
       });
-      for (const handle of mxga.whitelist) remoteWhitelist.add(handle);
+      const whitelistUserIds = Array.isArray(mxga.whitelistUserIds)
+        ? mxga.whitelistUserIds
+        : [];
+      const whitelistIdsAligned =
+        whitelistUserIds.length === mxga.whitelist.length;
+      mxga.whitelist.forEach((handle, index) => {
+        remoteWhitelist.add(handle);
+        const userId = whitelistIdsAligned ? whitelistUserIds[index] : "";
+        if (userId) remoteWhitelistUserIds.add(userId);
+      });
       remoteRules = sanitizeStoredRules(mxga.rules)
         .map(([rawPattern, field]) => ({
           field,
@@ -2172,6 +2720,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
 
     // 白名单只覆盖外部名单/规则；本脚本自己的内容启发式仍会生效。
     for (const handle of remoteWhitelist) remoteHandleSources.delete(handle);
+    for (const userId of remoteWhitelistUserIds) remoteUserIdSources.delete(userId);
     const decisionsChanged = invalidateDecisionCache();
 
     if (rescan && decisionsChanged && typeof document !== "undefined") {
@@ -2184,7 +2733,15 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
 
   async function syncMxga(previous = {}, force = false) {
     const priorWhitelist = sanitizeStringArray(previous.whitelist);
+    const priorWhitelistUserIds = sanitizeAlignedUserIds(
+      previous.whitelistUserIds,
+      priorWhitelist.length,
+    );
     const priorHandles = sanitizeStringArray(previous.handles);
+    const priorUserIds = sanitizeAlignedUserIds(
+      previous.userIds,
+      priorHandles.length,
+    );
     const priorCodes =
       Array.isArray(previous.codes) &&
       previous.codes.length === priorHandles.length
@@ -2196,6 +2753,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     ]);
 
     let handles = priorHandles;
+    let userIds = priorUserIds;
     let codes = priorCodes;
     let rules = sanitizeStoredRules(previous.rules);
     let version = String(previous.version || "");
@@ -2218,6 +2776,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
           ),
         );
         handles = artifact.handles;
+        userIds = artifact.userIds;
         codes = artifact.codes;
         rules = artifact.rules;
         version = artifact.version || meta.version || `n${handles.length}`;
@@ -2233,6 +2792,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       );
       if (mirror !== priorHandles) {
         handles = mirror;
+        userIds = [];
         codes = [];
         version = `mirror-${mirror.length}`;
         updatedAt = Date.now();
@@ -2243,13 +2803,16 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     }
 
     let whitelist = priorWhitelist;
+    let whitelistUserIds = priorWhitelistUserIds;
     let whitelistError = "";
     if (whitelistResult.status === "fulfilled") {
       try {
-        whitelist = validateMxgaWhitelist(
+        const validatedWhitelist = validateMxgaWhitelist(
           whitelistResult.value,
-          priorWhitelist,
+          { handles: priorWhitelist, userIds: priorWhitelistUserIds },
         );
+        whitelist = validatedWhitelist.handles;
+        whitelistUserIds = validatedWhitelist.userIds;
       } catch (error) {
         whitelistError = errorMessage(error);
       }
@@ -2260,13 +2823,17 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     // 白名单是误杀保护，主接口失败时必须再试一次镜像。
     if (whitelistError) {
       try {
-        whitelist = validateMxgaMirror(
+        const mirrorWhitelist = validateMxgaMirror(
           await requestJson(
             REMOTE.mxgaMirrorWhitelist,
             REMOTE.maxWhitelistChars,
           ),
           { previous: priorWhitelist },
         );
+        if (mirrorWhitelist !== priorWhitelist) {
+          whitelist = mirrorWhitelist;
+          whitelistUserIds = [];
+        }
         notices.push(`白名单改用 GitHub 镜像（${whitelistError}）`);
         whitelistError = "";
       } catch (error) {
@@ -2279,8 +2846,10 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       updatedAt,
       checkedAt: Date.now(),
       handles,
+      userIds,
       codes,
       whitelist,
+      whitelistUserIds,
       rules,
       lastError: whitelistError ? `白名单：${whitelistError}` : "",
       notice: notices.join("；"),
@@ -2453,17 +3022,21 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const mxgaCapacity = Math.round(
       ((mxga?.handles?.length || 0) / REMOTE.maxEntries) * 100,
     );
+    const mxgaIdCount = mxga?.userIds?.filter(Boolean).length || 0;
+    const whitelistIdCount =
+      mxga?.whitelistUserIds?.filter(Boolean).length || 0;
     return [
-      `X 回复净化器 v${VERSION}`,
+      `Purify X v${VERSION}`,
       "",
       `MXGA：${enabledBuiltInSources.has(BUILTIN_SOURCE.mxga) ? "已启用" : "未启用"} · ${mxga?.handles?.length || 0} 个账号，${mxga?.rules?.length || 0} 条规则`,
       `  版本：${mxga?.version || "未知"}`,
       `  更新时间：${formatTime(mxga?.updatedAt)}`,
       `  分级：人工确认 ${humanCount} · AI 自动 ${autoCount}（自动条目按 6 分计，需再有一条特征）`,
+      `  身份：${mxgaIdCount} 个数字 ID · 其余按 handle 回退`,
       `  容量：占上限 ${mxgaCapacity}%（${REMOTE.maxEntries} 条）`,
       `  状态：${mxga?.lastError || "正常"}`,
       ...(mxga?.notice ? [`  提示：${mxga.notice}`] : []),
-      `MXGA 白名单：${mxga?.whitelist?.length || 0} 个账号`,
+      `MXGA 白名单：${mxga?.whitelist?.length || 0} 个账号（${whitelistIdCount} 个数字 ID）`,
       "",
       `Twitter Block Porn：${enabledBuiltInSources.has(BUILTIN_SOURCE.twitterBlockPorn) ? "已启用" : "未启用"} · ${tbp?.handles?.length || 0} 个账号`,
       `  更新时间：${formatTime(tbp?.updatedAt)}`,
@@ -2519,6 +3092,112 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       .replace(/[\s\p{P}\p{S}]/gu, "");
   }
 
+  // 批量引流回复的稳定特征之一是在正常语句中间硬插 emoji，用来打断
+  // 关键词匹配。这里只认 emoji 两侧都紧贴汉字的情况：跟在标点或空格
+  // 后面的 emoji 属于普通用法，不计分。
+  function isMidSentenceEmojiInsertion(text) {
+    return MID_SENTENCE_EMOJI_RE.test(normalize(text));
+  }
+
+  function templateNormalizedBase(text) {
+    return normalize(text)
+      .replace(/https?:\/\/\S+/gi, "")
+      .replace(/[a-z0-9-]+\.(?:com|net|org|cn|tv|io|me|co)\S*/gi, "")
+      .replace(/@[a-z0-9_]{1,15}/gi, "")
+      .replace(EMOJI_RE, "")
+      .replace(DECORATIVE_RE, "")
+      .replace(/[\s\p{P}\p{S}]/gu, "");
+  }
+
+  // 归一化出用于跨账号模板复用比对的键。
+  // 第一个键去掉链接、@提及、emoji、装饰符号、空白和标点；第二个键在此
+  // 基础上再去掉拉丁字母和数字，用来抓「插入随机字母」的同族变体。
+  function templateKeys(text) {
+    const base = templateNormalizedBase(text);
+    const keys = [];
+    const accept = (value) => {
+      if (value.length < CONFIG.templateMinChars) return;
+      const unique = new Set(value).size;
+      if (unique / value.length < CONFIG.templateMinUniqueRatio) return;
+      if (!keys.includes(value)) keys.push(value);
+    };
+    accept(base);
+    accept(base.replace(/[a-z0-9]/gi, ""));
+    return keys;
+  }
+
+  function templateCjkNgrams(text) {
+    const base = templateNormalizedBase(text);
+    const cjk = (base.match(CJK_RE) || []).join("");
+    if (cjk.length < CONFIG.templateNearMinCjkChars) return null;
+    if (new Set(cjk).size / cjk.length < CONFIG.templateMinUniqueRatio) {
+      return null;
+    }
+    const grams = new Set();
+    for (
+      let index = 0;
+      index <= cjk.length - CONFIG.templateNearNgramSize;
+      index += 1
+    ) {
+      grams.add(cjk.slice(index, index + CONFIG.templateNearNgramSize));
+    }
+    return grams.size ? grams : null;
+  }
+
+  function nearDuplicateTemplateIds(entries) {
+    const duplicated = new Set();
+    const rows = [];
+    const postings = new Map();
+
+    for (const entry of entries) {
+      if (!entry.nearGrams) continue;
+      const candidateCounts = new Map();
+      for (const gram of entry.nearGrams) {
+        for (const index of postings.get(gram) || []) {
+          candidateCounts.set(index, (candidateCounts.get(index) || 0) + 1);
+        }
+      }
+      for (const [index, shared] of candidateCounts) {
+        const previous = rows[index];
+        if (!previous || previous.handle === entry.handle) continue;
+        const union =
+          previous.nearGrams.size + entry.nearGrams.size - shared;
+        if (union <= 0 || shared / union < CONFIG.templateNearJaccard) continue;
+        duplicated.add(previous.id);
+        duplicated.add(entry.id);
+      }
+
+      const rowIndex = rows.length;
+      rows.push(entry);
+      for (const gram of entry.nearGrams) {
+        const values = postings.get(gram) || [];
+        if (values.length < CONFIG.templateNearMaxPosting) {
+          values.push(rowIndex);
+          postings.set(gram, values);
+        }
+      }
+    }
+    return duplicated;
+  }
+
+  function mergeBehaviorRecordCache(
+    cache,
+    records,
+    limit = CONFIG.behaviorMaxRecords,
+  ) {
+    for (const record of records || []) {
+      const id = String(record?.id || "");
+      const handle = normalizeHandle(record?.handle);
+      if (!id || !handle) continue;
+      if (cache.has(id)) cache.delete(id);
+      cache.set(id, { ...record, id, handle });
+    }
+    while (cache.size > limit) {
+      cache.delete(cache.keys().next().value);
+    }
+    return cache;
+  }
+
   function isMentionEmojiOnlyReply(text) {
     const body = text
       .replace(/^(?:@[a-z0-9_]{1,15}\s*)+/i, "")
@@ -2560,51 +3239,95 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return segments.length >= 2;
   }
 
-  function detectReplyBehaviorSignals(articles) {
-    const candidates = [];
-    const lowInfoByHandle = new Map();
+  // 把回复区的 DOM 读成纯数据，行为判定本身放在 computeReplyBehaviorSignals
+  // 里，方便脱离浏览器做回归测试。
+  function replyBehaviorRecords(articles) {
+    const records = [];
     for (const article of articles) {
       if (!isTopLevelTweetArticle(article)) continue;
-      const id = articleStatusId(article);
-      const handle = articleHandle(article);
-      const createdAt = Date.parse(
-        article.querySelector("time")?.getAttribute("datetime") || "",
-      );
-      const text = normalize(
-        visibleText(article.querySelector(SELECTOR.tweetText)),
-      );
-      const name = normalize(
-        visibleText(article.querySelector(SELECTOR.userName)),
-      );
+      records.push({
+        id: articleStatusId(article),
+        handle: articleHandle(article),
+        createdAt: Date.parse(
+          article.querySelector("time")?.getAttribute("datetime") || "",
+        ),
+        text: normalize(
+          visibleText(article.querySelector(SELECTOR.tweetText)),
+        ),
+        name: normalize(
+          visibleText(article.querySelector(SELECTOR.userName)),
+        ),
+      });
+    }
+    return records;
+  }
+
+  function computeReplyBehaviorSignals(records) {
+    const entries = [];
+    const lowInfoByHandle = new Map();
+    // 同一段归一化文本出现在哪些账号和哪些回复下。跨账号复用是批量
+    // 投放最稳定的特征，比逐条追关键词变体更难规避。
+    const handlesByTemplate = new Map();
+    const idsByTemplate = new Map();
+
+    for (const record of records || []) {
+      const id = String(record?.id || "");
+      const handle = normalizeHandle(record?.handle);
+      if (!id || !handle) continue;
+      const text = normalize(record?.text);
+      const name = normalize(record?.name);
+      const createdAt = Number(record?.createdAt);
       const lowInfo =
-        isMentionEmojiOnlyReply(text) ||
-        isNumericSymbolSandwichReply(text);
-      if (
-        !id ||
-        !handle ||
-        !lowInfo
-      ) {
-        continue;
+        isMentionEmojiOnlyReply(text) || isNumericSymbolSandwichReply(text);
+      const keys = templateKeys(text);
+      const nearGrams = templateCjkNgrams(text);
+      entries.push({ id, handle, createdAt, name, lowInfo, keys, nearGrams });
+
+      if (lowInfo) {
+        const ids = lowInfoByHandle.get(handle) || [];
+        ids.push(id);
+        lowInfoByHandle.set(handle, ids);
       }
-      const ids = lowInfoByHandle.get(handle) || [];
-      ids.push(id);
-      lowInfoByHandle.set(handle, ids);
-      if (
-        Number.isFinite(createdAt) &&
-        countMatches(name, EMOJI_RE) >= 1
-      ) {
-        candidates.push({ id, handle, createdAt });
+      for (const key of keys) {
+        const handles = handlesByTemplate.get(key) || new Set();
+        handles.add(handle);
+        handlesByTemplate.set(key, handles);
+        const ids = idsByTemplate.get(key) || new Set();
+        ids.add(id);
+        idsByTemplate.set(key, ids);
       }
     }
-    candidates.sort((left, right) => left.createdAt - right.createdAt);
 
-    const coordinated = new Set();
+    const duplicated = new Set();
+    for (const [key, handles] of handlesByTemplate) {
+      if (handles.size < CONFIG.templateMinHandles) continue;
+      for (const id of idsByTemplate.get(key) || []) duplicated.add(id);
+    }
+    for (const id of nearDuplicateTemplateIds(entries)) duplicated.add(id);
+
     const repeated = new Set();
     for (const ids of lowInfoByHandle.values()) {
       if (ids.length < 2) continue;
       for (const id of ids) repeated.add(id);
     }
 
+    // burst 候选原先只收 emoji-only 一类低信息回复，带正文的批量模板
+    // 因此逃过了集群检测；跨账号复用同一段文本的回复现在同样计入。
+    const candidates = entries
+      .filter(
+        (entry) =>
+          (entry.lowInfo || duplicated.has(entry.id)) &&
+          Number.isFinite(entry.createdAt) &&
+          countMatches(entry.name, EMOJI_RE) >= 1,
+      )
+      .map((entry) => ({
+        id: entry.id,
+        handle: entry.handle,
+        createdAt: entry.createdAt,
+      }))
+      .sort((left, right) => left.createdAt - right.createdAt);
+
+    const coordinated = new Set();
     let first = 0;
     for (let last = 0; last < candidates.length; last += 1) {
       while (
@@ -2623,7 +3346,11 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       }
       for (const item of window) coordinated.add(item.id);
     }
-    return { coordinated, repeated };
+    return { coordinated, repeated, duplicated };
+  }
+
+  function detectReplyBehaviorSignals(articles) {
+    return computeReplyBehaviorSignals(replyBehaviorRecords(articles));
   }
 
   function isShortEmojiCode(text) {
@@ -2680,8 +3407,16 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     );
   }
 
-  function remoteRuleHit(text, name, handle, tweetsTranslated = false) {
-    if (!remoteRules.length || remoteWhitelist.has(handle)) return null;
+  function remoteRuleHit(
+    text,
+    name,
+    handle,
+    tweetsTranslated = false,
+    userId = "",
+  ) {
+    if (!remoteRules.length || identitySourceBits(userId, handle).whitelisted) {
+      return null;
+    }
 
     for (const { rawPattern, pattern, field } of remoteRules) {
       const patternHasCjk = CJK_RE.test(pattern);
@@ -2703,10 +3438,11 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return null;
   }
 
-  function remoteAccountSourceNames(rawHandle) {
+  function remoteAccountSourceNames(rawHandle, rawUserId = "") {
     const handle = normalizeHandle(rawHandle);
-    if (!handle || remoteWhitelist.has(handle)) return [];
-    const sourceBits = remoteHandleSources.get(handle) || 0;
+    const identity = identitySourceBits(rawUserId, handle);
+    if ((!handle && !rawUserId) || identity.whitelisted) return [];
+    const sourceBits = identity.sourceBits;
     const sources = [];
     if (sourceBits & REMOTE_SOURCE.mxga) sources.push("MXGA");
     if (sourceBits & REMOTE_SOURCE.twitterBlockPorn) {
@@ -2737,10 +3473,11 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
 
   // 只对 MXGA 命中的账号给申诉入口；Twitter Block Porn 与本地规则
   // 走不到 MXGA 的复核流程。
-  function mxgaAppealUrl(rawHandle) {
+  function mxgaAppealUrl(rawHandle, rawUserId = "") {
     const handle = normalizeHandle(rawHandle);
-    if (!handle || remoteWhitelist.has(handle)) return "";
-    const sourceBits = remoteHandleSources.get(handle) || 0;
+    const identity = identitySourceBits(rawUserId, handle);
+    if (!handle || identity.whitelisted) return "";
+    const sourceBits = identity.sourceBits;
     if (!(sourceBits & REMOTE_SOURCE.mxga)) return "";
     const params = new URLSearchParams({
       title: `误判申诉：@${handle}`,
@@ -2749,7 +3486,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         "",
         "申诉理由：",
         "",
-        "（由 X 回复净化器生成；该账号在 MXGA 公开名单中，请协助复核。）",
+        "（由 Purify X 生成；该账号在 MXGA 公开名单中，请协助复核。）",
       ].join("\n"),
     });
     return `${REMOTE.mxgaAppealBase}?${params.toString()}`;
@@ -2764,21 +3501,76 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     );
   }
 
-  function accountSourceNames(rawHandle) {
+  function accountSourceNames(rawHandle, rawUserId = "") {
     const handle = normalizeHandle(rawHandle);
     if (!handle || accountIsLocallyAllowed(handle)) return [];
     const sources = [];
     if (localBlockedHandles.has(handle)) sources.push("本地屏蔽");
     if (subscribedBlockedHandles.has(handle)) sources.push("自定义订阅");
-    sources.push(...remoteAccountSourceNames(handle));
+    sources.push(...remoteAccountSourceNames(handle, rawUserId));
     return sources;
+  }
+
+  function relatedAccountVerdict(identity) {
+    const handle = normalizeHandle(identity?.handle);
+    const userId = normalizeUserId(identity?.userId);
+    if (!handle || accountIsLocallyAllowed(handle)) return null;
+    // 引用作者的 React 身份发生 ID 冲突时，不采用公开名单的 handle 回退；
+    // 用户自己明确维护的本地/订阅 handle 规则仍可生效。
+    const sources = identity?.idConflict
+      ? [
+          ...(localBlockedHandles.has(handle) ? ["本地屏蔽"] : []),
+          ...(subscribedBlockedHandles.has(handle) ? ["自定义订阅"] : []),
+        ]
+      : accountSourceNames(handle, userId);
+    if (sources.length === 0) return null;
+
+    let points = 0;
+    let evidenceSource = EVIDENCE_SOURCE.list;
+    if (localBlockedHandles.has(handle)) {
+      points = 8;
+      evidenceSource = EVIDENCE_SOURCE.localList;
+    }
+    if (subscribedBlockedHandles.has(handle)) {
+      points = Math.max(points, 8);
+      if (evidenceSource === EVIDENCE_SOURCE.list) {
+        evidenceSource = EVIDENCE_SOURCE.subscription;
+      }
+    }
+    const remoteIdentity = identitySourceBits(userId, handle);
+    if (!identity?.idConflict && !remoteIdentity.whitelisted) {
+      points = Math.max(
+        points,
+        remoteListVerdict(remoteIdentity.sourceBits)?.points || 0,
+      );
+    }
+    return points > 0
+      ? { handle, userId, sources, points, evidenceSource }
+      : null;
   }
 
   function matchedKeywords(text, name, keywords, limit = 3) {
     const matches = [];
     for (const keyword of keywords) {
-      if (text.includes(keyword) || name.includes(keyword)) {
+      if (keywordMatches(text, keyword) || keywordMatches(name, keyword)) {
         matches.push(keyword);
+        if (matches.length >= limit) break;
+      }
+    }
+    return matches;
+  }
+
+  function matchedAiLearnedRules(text, limit = 3, now = Date.now()) {
+    const matches = [];
+    for (const rule of aiState.learnedRules) {
+      if (
+        rule.enabled === false ||
+        (rule.category !== "manual" && Number(rule.expiresAt) <= now)
+      ) {
+        continue;
+      }
+      if (keywordMatches(text, rule.value)) {
+        matches.push(rule.value);
         if (matches.length >= limit) break;
       }
     }
@@ -2794,6 +3586,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const text = normalize(rawText);
     const name = normalize(rawName);
     const handle = normalizeHandle(rawHandle);
+    const userId = normalizeUserId(options.userId);
     const reasons = [];
     const evidence = [];
     let score = 0;
@@ -2810,7 +3603,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     };
 
     if (!text && !name && !handle) {
-      return { score: 0, reasons: [], evidence: [], text, name, handle };
+      return { score: 0, reasons: [], evidence: [], text, name, handle, userId };
     }
     if (accountIsLocallyAllowed(handle)) {
       return {
@@ -2820,6 +3613,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         text,
         name,
         handle,
+        userId,
         allowed: true,
       };
     }
@@ -2840,6 +3634,9 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const networkPromoTemplate = NETWORK_PROMO_TEMPLATE_RE.test(text);
     const coordinatedBurst = Boolean(options.coordinatedBurst);
     const repeatedLowInfo = Boolean(options.repeatedLowInfo);
+    const duplicateTemplate = Boolean(options.duplicateTemplate);
+    const promotion = promotionPattern(text, options);
+    const remoteIdentity = identitySourceBits(userId, handle);
     const aiDecision =
       options.aiDecision && typeof options.aiDecision === "object"
         ? options.aiDecision
@@ -2857,12 +3654,16 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       name,
       subscribedStrongKeywords,
     );
-    const remoteCommunityKeywordHits = remoteWhitelist.has(handle)
+    const remoteCommunityKeywordHits = remoteIdentity.whitelisted
       ? []
       : matchedKeywords(text, "", remoteCommunityKeywords);
     const aiLearnedKeywordHits = aiConfig.enabled
-      ? matchedKeywords(text, "", aiLearnedKeywords)
+      ? matchedAiLearnedRules(text)
       : [];
+    const quotedAccount =
+      options.quotedAccount && typeof options.quotedAccount === "object"
+        ? options.quotedAccount
+        : null;
 
     if (localBlockedHandles.has(handle)) {
       add(
@@ -2879,13 +3680,13 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       );
     }
 
-    if (handle && !remoteWhitelist.has(handle)) {
-      const sourceBits = remoteHandleSources.get(handle) || 0;
+    if ((handle || userId) && !remoteIdentity.whitelisted) {
+      const sourceBits = remoteIdentity.sourceBits;
       const verdict = remoteListVerdict(sourceBits);
       if (verdict) {
-        const sources = remoteAccountSourceNames(handle);
-        // 账号名单按精确 @handle 命中；已关注账号和名单白名单会在
-        // processArticle 进入评分前放行。
+        const sources = remoteAccountSourceNames(handle, userId);
+        // 账号名单优先按不可变数字 ID 命中，拿不到可靠 ID 时再按
+        // 精确 @handle 回退；已关注账号和名单白名单在评分前放行。
         add(
           verdict.points,
           `账号命中 ${sources.join("、")}${verdict.tierNote ? `（${verdict.tierNote}）` : ""}`,
@@ -2897,6 +3698,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         name,
         handle,
         Boolean(options.tweetsTranslated),
+        userId,
       );
       if (rule) {
         const preview = rule.length > 36 ? `${rule.slice(0, 36)}…` : rule;
@@ -2906,6 +3708,24 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
           EVIDENCE_SOURCE.community,
         );
       }
+    }
+
+    if (
+      quotedAccount?.handle &&
+      Array.isArray(quotedAccount.sources) &&
+      quotedAccount.sources.length > 0 &&
+      Number(quotedAccount.points) > 0
+    ) {
+      const source = Object.values(EVIDENCE_SOURCE).includes(
+        quotedAccount.evidenceSource,
+      )
+        ? quotedAccount.evidenceSource
+        : EVIDENCE_SOURCE.list;
+      add(
+        Number(quotedAccount.points),
+        `引用作者 @${normalizeHandle(quotedAccount.handle)} 命中 ${quotedAccount.sources.join("、")}`,
+        source,
+      );
     }
 
     if (strongName) {
@@ -2969,8 +3789,25 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     if (textHasCta) {
       add(3, "引导查看主页或私聊", EVIDENCE_SOURCE.keyword);
     }
-    if (textHasContact) {
+    if (promotion.repliesRestricted) {
+      add(2, "发布者限制了回复权限", EVIDENCE_SOURCE.pattern);
+    }
+    if (promotion.telegramLink) {
+      add(4, "正文包含 Telegram 外部链接", EVIDENCE_SOURCE.pattern);
+    } else if (textHasContact) {
       add(3, "包含站外联系方式", EVIDENCE_SOURCE.keyword);
+    } else if (promotion.hasExternalLink) {
+      add(2, "正文包含外部链接", EVIDENCE_SOURCE.pattern);
+    }
+    if (promotion.promotionCopy) {
+      add(3, "正文含粉丝福利或推广话术", EVIDENCE_SOURCE.keyword);
+    }
+    if (promotion.highConfidence) {
+      add(
+        2,
+        "关闭评论、外部链接与推广话术同时出现",
+        EVIDENCE_SOURCE.pattern,
+      );
     }
     if (nameHasCta) {
       add(2, "昵称引导查看主页或联系", EVIDENCE_SOURCE.keyword);
@@ -3000,6 +3837,18 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         "同一账号在当前回复区重复发送低信息内容",
         EVIDENCE_SOURCE.pattern,
       );
+    }
+    // 跨账号模板复用和句内插 emoji 都只是特征分，单独命中都达不到阈值；
+    // 两者同时出现才构成「换 emoji 复用同一句」这种批量投放的完整证据。
+    if (duplicateTemplate) {
+      add(
+        5,
+        "多个账号在当前回复区复用同一段文本",
+        EVIDENCE_SOURCE.pattern,
+      );
+    }
+    if (isMidSentenceEmojiInsertion(text)) {
+      add(3, "正文中间插入 emoji 打断语句", EVIDENCE_SOURCE.pattern);
     }
     if (emojiOnlyReply) {
       add(2, "回复仅含提及和 emoji", EVIDENCE_SOURCE.pattern);
@@ -3071,12 +3920,64 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       );
     }
 
-    return { score, reasons, evidence, text, name, handle };
+    return {
+      score,
+      reasons,
+      evidence,
+      text,
+      name,
+      handle,
+      userId,
+      highConfidencePromotion: promotion.highConfidence,
+      learnedRuleHits: aiLearnedKeywordHits,
+    };
   }
 
   function statusIdFromLocation() {
     const match = location.pathname.match(/\/status\/(\d+)/);
     return match ? match[1] : "";
+  }
+
+  function detailNavigationStatusId(sourceHref, targetHref) {
+    try {
+      const source = new URL(sourceHref);
+      const target = new URL(targetHref, source);
+      if (target.origin !== source.origin) return "";
+      const match = target.pathname.match(/\/status\/(\d+)\/?$/);
+      return match ? match[1] : "";
+    } catch {
+      return "";
+    }
+  }
+
+  function timelineReturnSnapshotIsCurrent(
+    snapshot,
+    currentHref,
+    now = Date.now(),
+  ) {
+    const age = Number(now) - Number(snapshot?.capturedAt);
+    return Boolean(
+      snapshot?.sourceHref === currentHref &&
+        Number.isFinite(age) &&
+        age >= 0 &&
+        age <= CONFIG.timelineReturnMaxAgeMs,
+    );
+  }
+
+  function timelineReturnScrollDelta({
+    savedScrollY = 0,
+    currentScrollY = 0,
+    savedAnchorTop = null,
+    currentAnchorTop = null,
+  } = {}) {
+    if (
+      Number.isFinite(savedAnchorTop) &&
+      Number.isFinite(currentAnchorTop)
+    ) {
+      return currentAnchorTop - savedAnchorTop;
+    }
+    const delta = Number(savedScrollY) - Number(currentScrollY);
+    return Number.isFinite(delta) ? delta : 0;
   }
 
   function isFilterableTimeline() {
@@ -3088,11 +3989,112 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     );
   }
 
+  function isProfileMediaPath(pathname = "") {
+    const parts = String(pathname || "")
+      .split("/")
+      .filter(Boolean)
+      .map((part) => part.toLowerCase());
+    return Boolean(
+      parts.length === 2 &&
+        parts[1] === "media" &&
+        HANDLE_RE.test(parts[0]) &&
+        !RESERVED_PROFILE_PATHS.has(parts[0]),
+    );
+  }
+
+  function mediaSubtabKind(rawLabel) {
+    const label = normalize(rawLabel).replace(/\s+/g, " ");
+    if (/^(photos?|照片|相片|图片|圖片|写真)$/.test(label)) {
+      return "photos";
+    }
+    if (/^(videos?|视频|影片|短片|動画)$/.test(label)) {
+      return "videos";
+    }
+    return "";
+  }
+
+  function mediaPhotosDefaultAction({
+    pathname = "",
+    photosSelected = false,
+    hasPhotosOption = false,
+    hasVideosTrigger = false,
+    menuRequested = false,
+  } = {}) {
+    if (!isProfileMediaPath(pathname)) return "none";
+    if (photosSelected) return "done";
+    if (hasPhotosOption) return "select-photos";
+    if (hasVideosTrigger && !menuRequested) return "open-videos-menu";
+    return "wait";
+  }
+
+  // 用户进入详情页就是为了阅读主贴，因此主贴始终保留；只有下方回复运行完整
+  // 内容与行为规则。时间线仍由独立开关控制，并只把账号名单当作过滤入口。
+  function articleFilterScope({
+    mainStatusId = "",
+    currentStatusId = "",
+    timelineEligible = false,
+    filterTimeline = false,
+  } = {}) {
+    if (mainStatusId) {
+      return currentStatusId === mainStatusId ? "none" : "thread-reply";
+    }
+    return timelineEligible && filterTimeline ? "timeline" : "none";
+  }
+
+  function contentPolicyForSurface({
+    scope = "none",
+    primaryAccountListed = false,
+    relatedAccountListed = false,
+    highConfidencePromotion = false,
+  } = {}) {
+    if (scope === "thread-reply") return "full";
+    if (scope === "timeline") {
+      return primaryAccountListed || relatedAccountListed || highConfidencePromotion
+        ? "account-candidate"
+        : "none";
+    }
+    return "none";
+  }
+
   function articleStatusId(article) {
     const time = article.querySelector("time");
     const href = time?.closest("a[href*='/status/']")?.getAttribute("href") || "";
     const match = href.match(/\/status\/(\d+)/);
     return match ? match[1] : "";
+  }
+
+  // X 把转推渲染成一张普通推文卡片，卡片作者是**原推作者**，转推者只出现在
+  // 顶部的 socialContext 行里（「XXX 已转推」）。同一个 socialContext 还用于
+  // 置顶、点赞和推荐，因此必须同时满足转推动词和指向账号主页的链接，才认定
+  // 这是一条转推；任何一步不成立都返回空串，回到按原作者判定的既有行为。
+  const REPOST_CONTEXT_RE =
+    /(reposted|retweeted|已[转轉][推帖发發]|[转轉][推帖发發]了|リポスト|재게시)/i;
+
+  function repostHandleFromContext(rawText, hrefs) {
+    const text = normalize(rawText);
+    if (!REPOST_CONTEXT_RE.test(text)) return "";
+    for (const href of hrefs || []) {
+      const path = String(href || "")
+        .split(/[?#]/, 1)[0]
+        .replace(/^\/+|\/+$/g, "");
+      if (!path.includes("/") && HANDLE_RE.test(path)) {
+        return normalizeHandle(path);
+      }
+    }
+    const match = text.match(/@([a-z0-9_]{1,15})\b/i);
+    return match ? normalizeHandle(match[1]) : "";
+  }
+
+  function articleRepostHandle(article) {
+    const context = article.querySelector(SELECTOR.socialContext);
+    if (!context) return "";
+    const hrefs = [];
+    const wrapper = context.closest('a[href^="/"]');
+    if (wrapper) hrefs.push(wrapper.getAttribute("href"));
+    for (const link of context.querySelectorAll('a[href^="/"]')) {
+      hrefs.push(link.getAttribute("href"));
+    }
+    return repostHandleFromContext(visibleText(context), hrefs);
   }
 
   function articleHandle(article) {
@@ -3110,6 +4112,211 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
 
     const match = visibleText(userName).match(/@([a-z0-9_]{1,15})\b/i);
     return match ? normalizeHandle(match[1]) : "";
+  }
+
+  const TWITTER_SNOWFLAKE_EPOCH_MS = 1_288_834_974_657n;
+  const USER_ID_CREATED_AT_TOLERANCE_MS = 2 * 86_400_000;
+
+  function normalizeUserId(value) {
+    if (typeof value === "number" && Number.isSafeInteger(value)) {
+      return String(value);
+    }
+    return typeof value === "string" && /^\d{1,32}$/.test(value)
+      ? value
+      : "";
+  }
+
+  function conversationReplyRestrictionFromReactObjects(
+    roots,
+    expectedStatusId = "",
+  ) {
+    const targetStatusId = normalizeUserId(expectedStatusId);
+    const queue = (Array.isArray(roots) ? roots : []).map((value) => ({
+      value,
+      depth: 0,
+    }));
+    const seen = new Set();
+    let inspected = 0;
+    let cursor = 0;
+
+    while (cursor < queue.length && inspected < 5000) {
+      const current = queue[cursor];
+      cursor += 1;
+      const value = current?.value;
+      const depth = current?.depth || 0;
+      if (!value || typeof value !== "object" || seen.has(value)) continue;
+      if (depth > 6) continue;
+      try {
+        if (
+          (typeof Node !== "undefined" && value instanceof Node) ||
+          (typeof Window !== "undefined" && value instanceof Window)
+        ) {
+          continue;
+        }
+      } catch {
+        continue;
+      }
+
+      seen.add(value);
+      inspected += 1;
+      try {
+        const legacy =
+          value.legacy && typeof value.legacy === "object"
+            ? value.legacy
+            : value;
+        const statusId = normalizeUserId(
+          legacy.id_str || value.rest_id || value.id_str,
+        );
+        if (!targetStatusId || statusId === targetStatusId) {
+          const control =
+            legacy.conversation_control || value.conversation_control;
+          const policy = normalize(control?.policy).replace(/[\s-]+/g, "_");
+          if (policy) {
+            return {
+              repliesRestricted: policy !== "everyone",
+              policy,
+            };
+          }
+          const limitedActions =
+            legacy.limited_action_results || value.limited_action_results;
+          if (
+            Array.isArray(limitedActions) &&
+            limitedActions.some(
+              (item) => normalize(item?.action) === "reply",
+            )
+          ) {
+            return { repliesRestricted: true, policy: "limited_reply" };
+          }
+        }
+
+        if (depth < 6) {
+          for (const key of Object.keys(value)) {
+            let child;
+            try {
+              child = value[key];
+            } catch {
+              continue;
+            }
+            if (
+              child &&
+              typeof child === "object" &&
+              queue.length < 8000
+            ) {
+              queue.push({ value: child, depth: depth + 1 });
+            }
+          }
+        }
+      } catch {
+        // X 的 React 数据可能包含抛错 getter；跳过该分支。
+      }
+    }
+
+    return { repliesRestricted: false, policy: "" };
+  }
+
+  function snowflakeTimeMs(userId) {
+    if (userId.length < 16) return NaN;
+    try {
+      return Number((BigInt(userId) >> 22n) + TWITTER_SNOWFLAKE_EPOCH_MS);
+    } catch {
+      return NaN;
+    }
+  }
+
+  function userIdFromReactUser(value, expectedHandle) {
+    if (!value || typeof value !== "object") {
+      return { userId: "", conflict: false };
+    }
+    const legacy =
+      value.legacy && typeof value.legacy === "object"
+        ? value.legacy
+        : value;
+    const handle = normalizeHandle(
+      legacy.screen_name || value.screen_name,
+    );
+    if (!handle || handle !== normalizeHandle(expectedHandle)) {
+      return { userId: "", conflict: false };
+    }
+    const legacyId = normalizeUserId(legacy.id_str);
+    const restId = normalizeUserId(value.rest_id);
+    if (legacyId && restId && legacyId !== restId) {
+      return { userId: "", conflict: true };
+    }
+    const userId = legacyId || restId;
+    if (!userId) return { userId: "", conflict: false };
+
+    const avatarId = normalizeUserId(
+      String(legacy.profile_image_url_https || "").match(
+        /profile_images\/(\d+)\//,
+      )?.[1],
+    );
+    const createdAt = Date.parse(String(legacy.created_at || ""));
+    const inferredAt = snowflakeTimeMs(userId);
+    if (
+      avatarId === userId &&
+      Number.isFinite(createdAt) &&
+      Number.isFinite(inferredAt) &&
+      Math.abs(inferredAt - createdAt) > USER_ID_CREATED_AT_TOLERANCE_MS
+    ) {
+      return { userId: "", conflict: true };
+    }
+    return { userId, conflict: false };
+  }
+
+  function actionIdentityFromMetadata(testId, label, expectedHandle) {
+    const match = String(testId || "").match(
+      /^(\d{1,32})-(follow|unfollow|subscribe)$/,
+    );
+    if (!match) return { userId: "", following: null };
+    const handle = normalizeHandle(expectedHandle);
+    if (
+      handle &&
+      !normalize(label).includes(`@${handle}`)
+    ) {
+      return { userId: "", following: null };
+    }
+    return {
+      userId: match[1],
+      following: match[2] === "unfollow" ? true : match[2] === "follow" ? false : null,
+    };
+  }
+
+  function profileJsonLdUserId(expectedHandle, scripts = null) {
+    const rows = scripts || [
+      ...document.querySelectorAll('script[type="application/ld+json"]'),
+    ].map((script) => script.textContent || "");
+    const expected = normalizeHandle(expectedHandle);
+    for (const raw of rows) {
+      try {
+        const parsed = typeof raw === "string" ? JSON.parse(raw) : raw;
+        for (const page of Array.isArray(parsed) ? parsed : [parsed]) {
+          if (!page || page["@type"] !== "ProfilePage") continue;
+          const person = page.mainEntity;
+          if (!person || person["@type"] !== "Person") continue;
+          const handle = normalizeHandle(
+            person.additionalName ||
+              String(person.url || "").match(/\/([^/?#]+)(?:[?#].*)?$/)?.[1],
+          );
+          if (expected && handle !== expected) continue;
+          const userId = normalizeUserId(person.identifier);
+          if (userId) return userId;
+        }
+      } catch {
+        // 无关或损坏的 JSON-LD 不影响页面处理。
+      }
+    }
+    return "";
+  }
+
+  function cachedProfileUserId(handle) {
+    const normalizedHandle = normalizeHandle(handle);
+    if (!normalizedHandle) return "";
+    const cached = profileUserIdCache.get(normalizedHandle);
+    if (cached) return cached;
+    const userId = profileJsonLdUserId(normalizedHandle);
+    // JSON-LD 可能晚于页面骨架出现；只缓存成功结果，空结果允许后续扫描重试。
+    if (userId) profileUserIdCache.set(normalizedHandle, userId);
+    return userId;
   }
 
   function viewerHandle() {
@@ -3131,26 +4338,29 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return knownViewerHandle;
   }
 
-  function visibleFollowingState(article, handle) {
+  function visibleRelationshipIdentity(article, handle) {
     const mention = `@${handle}`;
     for (const button of article.querySelectorAll(
-      '[data-testid$="-follow"], [data-testid$="-unfollow"]',
+      '[data-testid$="-follow"], [data-testid$="-unfollow"], [data-testid$="-subscribe"]',
     )) {
       const label = normalize(
         `${button.getAttribute("aria-label") || ""} ${visibleText(button)}`,
       );
       if (!label.includes(mention)) continue;
       const testId = button.getAttribute("data-testid") || "";
-      if (testId.endsWith("-unfollow")) return true;
-      if (testId.endsWith("-follow")) return false;
+      const identity = actionIdentityFromMetadata(testId, label, handle);
+      if (identity.userId || identity.following !== null) return identity;
     }
-    return null;
+    return { userId: "", following: null };
   }
 
   function relationshipFromReactObjects(roots, expectedHandle) {
     const queue = roots.map((value) => ({ value, depth: 0 }));
     const seen = new Set();
     let sawExplicitNotFollowing = false;
+    let sawFollowing = false;
+    let userId = "";
+    let idConflict = false;
     let inspected = 0;
     let cursor = 0;
 
@@ -3184,6 +4394,21 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
           legacy.screen_name || value.screen_name,
         );
         if (screenName === expectedHandle) {
+          const identity = userIdFromReactUser(value, expectedHandle);
+          if (identity.conflict) {
+            idConflict = true;
+            userId = "";
+          } else if (
+            !idConflict &&
+            identity.userId &&
+            userId &&
+            identity.userId !== userId
+          ) {
+            idConflict = true;
+            userId = "";
+          } else if (!idConflict && identity.userId) {
+            userId = identity.userId;
+          }
           const perspective =
             value.relationship_perspectives &&
             typeof value.relationship_perspectives === "object"
@@ -3194,7 +4419,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             legacy.follow_request_sent === true ||
             perspective?.following === true
           ) {
-            return true;
+            sawFollowing = true;
           }
           if (
             legacy.following === false ||
@@ -3226,10 +4451,20 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       }
     }
 
-    return sawExplicitNotFollowing ? false : null;
+    return {
+      following: sawFollowing
+        ? true
+        : sawExplicitNotFollowing
+          ? false
+          : null,
+      userId: idConflict ? "" : userId,
+      idConflict,
+    };
   }
 
-  function reactFollowingState(article, handle) {
+  function reactRootsFromArticle(article) {
+    const cached = scanReactRootsCache.get(article);
+    if (cached) return cached;
     const roots = [];
     const elements = [
       article,
@@ -3279,41 +4514,355 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       }
     }
 
-    return relationshipFromReactObjects(
-      roots.filter(Boolean),
-      handle,
+    const result = roots.filter(Boolean);
+    scanReactRootsCache.set(article, result);
+    return result;
+  }
+
+  function articlePromotionSignals(article, statusId = "", rawText = "") {
+    const tweetText = article.querySelector(SELECTOR.tweetText);
+    const linkValues = [];
+    for (const link of tweetText?.querySelectorAll("a[href]") || []) {
+      linkValues.push(
+        link.getAttribute("href") || "",
+        link.getAttribute("title") || "",
+        visibleText(link),
+      );
+    }
+    const links = externalLinkSignals(linkValues);
+    // React 树遍历只留给已经同时出现外链与推广话术的少数候选帖；普通时间线
+    // 不为读取 conversation_control 付额外成本。
+    if (!links.hasExternalLink || !PROMOTION_COPY_RE.test(normalize(rawText))) {
+      return { ...links, repliesRestricted: false, policy: "" };
+    }
+    const restriction = conversationReplyRestrictionFromReactObjects(
+      reactRootsFromArticle(article),
+      statusId,
+    );
+    return { ...links, ...restriction };
+  }
+
+  function reactRelationshipIdentity(article, handle) {
+    return relationshipFromReactObjects(reactRootsFromArticle(article), handle);
+  }
+
+  function reactTweetUser(tweet) {
+    return (
+      tweet?.core?.user_results?.result ||
+      tweet?.user_results?.result ||
+      tweet?.user ||
+      null
     );
   }
 
-  function viewerFollowingState(article, handle) {
-    if (!handle) return null;
+  function reactTweetHandle(tweet) {
+    const user = reactTweetUser(tweet);
+    return normalizeHandle(user?.legacy?.screen_name || user?.screen_name);
+  }
+
+  function repostIdentityFromReactObjects(
+    roots,
+    expectedAuthorHandle,
+    expectedStatusId = "",
+  ) {
+    const fallback = {
+      isRepost: false,
+      handle: "",
+      userId: "",
+      following: null,
+      idConflict: false,
+    };
+    const authorHandle = normalizeHandle(expectedAuthorHandle);
+    const statusId = normalizeUserId(expectedStatusId);
+    const queue = (roots || []).map((value) => ({ value, depth: 0 }));
+    const seen = new Set();
+    let cursor = 0;
+    let inspected = 0;
+
+    while (cursor < queue.length && inspected < 5000) {
+      const { value, depth } = queue[cursor] || {};
+      cursor += 1;
+      if (!value || typeof value !== "object" || seen.has(value) || depth > 7) {
+        continue;
+      }
+      seen.add(value);
+      inspected += 1;
+
+      try {
+        const retweeted =
+          value?.legacy?.retweeted_status_result?.result ||
+          value?.retweeted_status_result?.result;
+        if (retweeted && typeof retweeted === "object") {
+          const originalHandle = reactTweetHandle(retweeted);
+          const originalStatusId = normalizeUserId(retweeted.rest_id);
+          if (
+            (!authorHandle || originalHandle === authorHandle) &&
+            (!statusId || !originalStatusId || originalStatusId === statusId)
+          ) {
+            const repostUser = reactTweetUser(value);
+            const repostHandle = normalizeHandle(
+              repostUser?.legacy?.screen_name || repostUser?.screen_name,
+            );
+            if (repostHandle && repostHandle !== originalHandle) {
+              const relationship = relationshipFromReactObjects(
+                [repostUser],
+                repostHandle,
+              );
+              return {
+                isRepost: true,
+                handle: repostHandle,
+                userId: relationship.userId,
+                following: relationship.following,
+                idConflict: relationship.idConflict,
+              };
+            }
+          }
+        }
+
+        if (depth < 7) {
+          for (const key of Object.keys(value)) {
+            const child = value[key];
+            if (child && typeof child === "object" && queue.length < 8000) {
+              queue.push({ value: child, depth: depth + 1 });
+            }
+          }
+        }
+      } catch {
+        // React 对象可能有抛错 getter；忽略该分支。
+      }
+    }
+    return fallback;
+  }
+
+  function articleRepostIdentity(article, authorHandle, statusId = "") {
+    const contextHandle = articleRepostHandle(article);
+    const react = repostIdentityFromReactObjects(
+      reactRootsFromArticle(article),
+      authorHandle,
+      statusId,
+    );
+    if (react.isRepost) {
+      if (contextHandle && contextHandle !== react.handle) {
+        // DOM 和 React 对转推者身份意见不一致时仍确认它是转推，但不采用任一账号；
+        // 后续按 unknown 放行，避免错误折叠关注账号的转推。
+        return { ...react, handle: "", userId: "", following: null, idConflict: true };
+      }
+      return react;
+    }
+    return contextHandle
+      ? {
+          isRepost: true,
+          handle: contextHandle,
+          userId: "",
+          following: null,
+          idConflict: false,
+        }
+      : react;
+  }
+
+  function quotedIdentityFromReactObjects(
+    roots,
+    expectedAuthorHandle,
+    expectedStatusId = "",
+  ) {
+    const fallback = {
+      isQuote: false,
+      handle: "",
+      userId: "",
+      following: null,
+      idConflict: false,
+    };
+    const authorHandle = normalizeHandle(expectedAuthorHandle);
+    const statusId = normalizeUserId(expectedStatusId);
+    const queue = (roots || []).map((value) => ({ value, depth: 0 }));
+    const seen = new Set();
+    let cursor = 0;
+    let inspected = 0;
+
+    while (cursor < queue.length && inspected < 5000) {
+      const { value, depth } = queue[cursor] || {};
+      cursor += 1;
+      if (!value || typeof value !== "object" || seen.has(value) || depth > 7) {
+        continue;
+      }
+      seen.add(value);
+      inspected += 1;
+
+      try {
+        const rawQuoted =
+          value?.legacy?.quoted_status_result?.result ||
+          value?.quoted_status_result?.result;
+        const quoted = rawQuoted?.tweet || rawQuoted;
+        if (quoted && typeof quoted === "object") {
+          const outerHandle = reactTweetHandle(value);
+          const outerStatusId = normalizeUserId(value.rest_id);
+          if (
+            (!authorHandle || outerHandle === authorHandle) &&
+            (!statusId || !outerStatusId || outerStatusId === statusId)
+          ) {
+            const quotedHandle = reactTweetHandle(quoted);
+            const quotedUser = reactTweetUser(quoted);
+            if (quotedHandle && quotedHandle !== outerHandle && quotedUser) {
+              const relationship = relationshipFromReactObjects(
+                [quotedUser],
+                quotedHandle,
+              );
+              return {
+                isQuote: true,
+                handle: quotedHandle,
+                userId: relationship.userId,
+                following: relationship.following,
+                idConflict: relationship.idConflict,
+              };
+            }
+          }
+        }
+
+        if (depth < 7) {
+          for (const key of Object.keys(value)) {
+            const child = value[key];
+            if (child && typeof child === "object" && queue.length < 8000) {
+              queue.push({ value: child, depth: depth + 1 });
+            }
+          }
+        }
+      } catch {
+        // React 对象可能有抛错 getter；忽略该分支。
+      }
+    }
+    return fallback;
+  }
+
+  function articleQuotedIdentity(article, authorHandle, statusId = "") {
+    const cached = quotedIdentityCache.get(article);
+    if (
+      cached?.authorHandle === authorHandle &&
+      cached?.statusId === statusId
+    ) {
+      return cached.result;
+    }
+    const result = quotedIdentityFromReactObjects(
+      reactRootsFromArticle(article),
+      authorHandle,
+      statusId,
+    );
+    quotedIdentityCache.set(article, {
+      authorHandle,
+      statusId,
+      result,
+    });
+    return result;
+  }
+
+  function articleRelationshipIdentity(article, handle) {
+    if (!handle) return { following: null, userId: "", idConflict: false };
     const self = viewerHandle();
-    if (self && self === handle) return true;
+    if (self && self === handle) {
+      return { following: true, userId: "", idConflict: false };
+    }
     const cached = relationshipArticleCache.get(article);
     if (
       cached?.handle === handle &&
       Date.now() - cached.checkedAt < 30_000
     ) {
-      return cached.state;
+      return cached;
     }
 
-    const visible = visibleFollowingState(article, handle);
-    const state =
-      visible === null ? reactFollowingState(article, handle) : visible;
-    if (state !== null) {
-      relationshipHandleCache.set(handle, state);
-      relationshipArticleCache.set(article, {
-        handle,
-        state,
-        checkedAt: Date.now(),
-      });
-      return state;
+    const visible = visibleRelationshipIdentity(article, handle);
+    const react = visible.userId
+      ? { following: null, userId: "", idConflict: false }
+      : reactRelationshipIdentity(article, handle);
+    const idConflict = Boolean(
+      react.idConflict ||
+        (visible.userId && react.userId && visible.userId !== react.userId),
+    );
+    const result = {
+      handle,
+      following:
+        visible.following === null ? react.following : visible.following,
+      userId: idConflict ? "" : visible.userId || react.userId,
+      idConflict,
+      checkedAt: Date.now(),
+    };
+    if (result.following !== null) {
+      relationshipHandleCache.set(handle, result.following);
+    }
+    if (result.following !== null || result.userId || result.idConflict) {
+      relationshipArticleCache.set(article, result);
+      return result;
     }
     // X 会回收回复 DOM，React 关系数据也会短暂缺失。沿用同一账号在本页
     // 已经确认过的关系，避免 unknown/false 来回切换造成回复反复闪烁。
-    return relationshipHandleCache.has(handle)
-      ? relationshipHandleCache.get(handle)
-      : null;
+    return {
+      ...result,
+      following: relationshipHandleCache.has(handle)
+        ? relationshipHandleCache.get(handle)
+        : null,
+    };
+  }
+
+  function viewerFollowingState(article, handle) {
+    return articleRelationshipIdentity(article, handle).following;
+  }
+
+  // 转推者的关系状态单独缓存：articleRelationshipIdentity 的缓存按
+  // article 存一个 handle，用它查转推者会把作者的结果顶掉，导致每轮扫描
+  // 都要重跑两次 fiber 遍历。
+  function repostFollowingState(article, repostHandle) {
+    if (!repostHandle) return null;
+    if (relationshipHandleCache.has(repostHandle)) {
+      return relationshipHandleCache.get(repostHandle);
+    }
+    const cached = repostRelationshipCache.get(article);
+    if (
+      cached?.handle === repostHandle &&
+      Date.now() - cached.checkedAt < 30_000
+    ) {
+      return cached.following;
+    }
+
+    const visible = visibleRelationshipIdentity(article, repostHandle);
+    const following =
+      visible.following === null
+        ? reactRelationshipIdentity(article, repostHandle).following
+        : visible.following;
+    if (following !== null) {
+      relationshipHandleCache.set(repostHandle, following);
+    }
+    repostRelationshipCache.set(article, {
+      handle: repostHandle,
+      following,
+      checkedAt: Date.now(),
+    });
+    return following;
+  }
+
+  // 一条转推出现在你的时间线或回复区，前提是有人转了它。转推者已关注、
+  // 是你自己或在放行名单时直接放行；关系暂时读不到时同样放行，与项目对
+  // 账号本身「无法确认关系就不隐藏」的硬规则保持一致。只有转推者被明确
+  // 判定为未关注，或被你自己拉黑，才回到按原推作者判定。
+  function repostProtectionState(article, repostIdentity, authorHandle) {
+    if (!repostIdentity?.isRepost) return "";
+    const repostHandle = normalizeHandle(repostIdentity.handle);
+    if (!repostHandle) return "protected-repost-unknown";
+    if (repostHandle === authorHandle) return "";
+    if (accountIsLocallyAllowed(repostHandle)) return "protected-repost-allow";
+    const self = viewerHandle();
+    if (self && self === repostHandle) return "protected-repost-self";
+    if (
+      localBlockedHandles.has(repostHandle) ||
+      subscribedBlockedHandles.has(repostHandle)
+    ) {
+      return "";
+    }
+    const following =
+      repostIdentity.following === null
+        ? repostFollowingState(article, repostHandle)
+        : repostIdentity.following;
+    if (following === false) return "";
+    return following === true
+      ? "protected-repost-following"
+      : "protected-repost-unknown";
   }
 
   function retryUnknownFollowingState(article, handle) {
@@ -3340,7 +4889,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
   }
 
   function fingerprint(article, text, name) {
-    return `${VERSION}|${articleStatusId(article)}|${name.slice(0, 80)}|${text.slice(0, 280)}`;
+    return `${VERSION}|${decisionCacheRevision}|${articleStatusId(article)}|${name.slice(0, 80)}|${text.slice(0, 280)}`;
   }
 
   function findCell(article) {
@@ -3404,6 +4953,12 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     label,
   }) {
     if (!(container instanceof Element) || !(host instanceof Element)) return;
+    for (const link of container.querySelectorAll(".xps-account-name-link")) {
+      if (link !== after) link.classList.remove("xps-account-name-link");
+    }
+    if (after instanceof Element) {
+      after.classList.add("xps-account-name-link");
+    }
     let badge = container.querySelector(
       `.${CLASS.accountBadge}[data-xps-context="${context}"]`,
     );
@@ -3427,8 +4982,9 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     if (host !== container) host.classList.add("xps-account-badge-host");
     badge.dataset.xpsHandle = handle;
     badge.dataset.xpsKind = kind;
+    badge.dataset.xpsCompactLabel = kind === "list" ? "低" : "疑";
     badge.textContent = label;
-    badge.title = `X 回复净化器\n@${handle}\n${details}`;
+    badge.title = `Purify X\n@${handle}\n${details}`;
     badge.setAttribute("aria-label", `${label}：${details}`);
     if (!HANDLE_RE.test(handle)) return;
     let allowButton = container.querySelector(
@@ -3439,7 +4995,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       allowButton.type = "button";
       allowButton.className = "xps-account-allow";
       allowButton.dataset.xpsContext = context;
-      allowButton.textContent = "永远放行";
+      allowButton.textContent = "永久放行";
       allowButton.addEventListener("click", async (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -3450,7 +5006,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         const saved = await allowHandleLocally(targetHandle);
         if (!saved) {
           allowButton.disabled = false;
-          allowButton.textContent = "永远放行";
+          allowButton.textContent = "永久放行";
           showToast("无法保存该账号", "error");
         }
       });
@@ -3481,13 +5037,22 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         host.classList.remove("xps-account-badge-host");
       }
     }
+    for (const link of container.querySelectorAll(".xps-account-name-link")) {
+      if (!link.parentElement?.querySelector(`.${CLASS.accountBadge}`)) {
+        link.classList.remove("xps-account-name-link");
+      }
+    }
   }
 
-  function annotateTweetListedAccount(article, knownHandle = "") {
+  function annotateTweetListedAccount(
+    article,
+    knownHandle = "",
+    knownUserId = "",
+  ) {
     if (!(article instanceof Element)) return;
     const userName = article.querySelector(SELECTOR.userName);
     const handle = knownHandle || articleHandle(article);
-    const sources = accountSourceNames(handle);
+    const sources = accountSourceNames(handle, knownUserId);
     if (!userName || !handle || sources.length === 0) {
       removeAccountBadge(userName, "tweet", "list");
       return;
@@ -3502,22 +5067,30 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     });
   }
 
-  function annotateReplyResult(article, result, knownHandle = "") {
+  function annotateReplyResult(
+    article,
+    result,
+    knownHandle = "",
+    knownUserId = "",
+  ) {
     const userName = article.querySelector(SELECTOR.userName);
     const handle = result?.handle || knownHandle || articleHandle(article);
-    const sources = accountSourceNames(handle);
+    const userId = result?.userId || knownUserId;
+    const sources = accountSourceNames(handle, userId);
     if (sources.length > 0) {
-      annotateTweetListedAccount(article, handle);
+      annotateTweetListedAccount(article, handle, userId);
       return;
     }
     if (result?.score >= CONFIG.threshold) {
+      const contentLabel =
+        result.itemLabel === "推广内容" ? "推广内容" : "可疑回复";
       setAccountBadge(userName, {
         ...tweetBadgePlacement(userName, handle),
         context: "tweet",
         details: evidenceLine(result.evidence, 4),
         handle,
         kind: "reply",
-        label: "可疑回复",
+        label: contentLabel,
       });
       return;
     }
@@ -3562,7 +5135,8 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     }
     if (!handle || !profileUserName) return;
 
-    const sources = accountSourceNames(handle);
+    const userId = cachedProfileUserId(handle);
+    const sources = accountSourceNames(handle, userId);
     if (sources.length === 0) {
       removeAccountBadge(profileUserName, "profile");
       return;
@@ -3580,9 +5154,11 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
   function makePlaceholder(cell, result, fp) {
     let placeholder = cell.querySelector(`:scope > .${CLASS.placeholder}`);
     const evidenceSignature = JSON.stringify(result.evidence || []);
+    const appealVisibility = preferences.showAppealButton ? "shown" : "hidden";
     if (
       placeholder?.dataset.xpsVersion === VERSION &&
-      placeholder.dataset.xpsEvidence === evidenceSignature
+      placeholder.dataset.xpsEvidence === evidenceSignature &&
+      placeholder.dataset.xpsAppealVisibility === appealVisibility
     ) {
       return placeholder;
     }
@@ -3595,6 +5171,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     placeholder.className = CLASS.placeholder;
     placeholder.dataset.xpsVersion = VERSION;
     placeholder.dataset.xpsEvidence = evidenceSignature;
+    placeholder.dataset.xpsAppealVisibility = appealVisibility;
     placeholder.title = result.reasons.join("\n");
 
     const copy = document.createElement("span");
@@ -3632,21 +5209,36 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       filteredCells.delete(cell);
       const article = cell.querySelector(SELECTOR.tweet);
       if (article) forgetHiddenStatus(article);
+      const disabledRules = recordAiFalsePositiveFeedback(
+        result,
+        article ? articleStatusId(article) : "",
+      );
       article?.setAttribute(ATTRIBUTE.state, "restored");
       refreshGroups();
       updateCounter();
+      if (disabledRules.length > 0) {
+        showToast(
+          `已自动停用误判累计达到 3 次的 AI 学习规则：${disabledRules.join("、")}`,
+          "success",
+        );
+      }
     });
 
     const actions = document.createElement("span");
     actions.className = "xps-placeholder-actions";
-    // 放行是永久、跨会话的动作，恢复此条只影响当前这一条；
-    // 把分量更重的放行放前面并单独着色，避免和临时恢复混淆误点。
+    // 先放高频、可逆的单条恢复；永久放行固定在动作区最右侧并降低强调，
+    // 避免它停在屏幕中央成为最容易误点的按钮。
+    actions.append(restoreButton);
     if (HANDLE_RE.test(result.handle || "")) {
       const allowButton = document.createElement("button");
       allowButton.type = "button";
       allowButton.className = "xps-allow-account";
-      allowButton.textContent = "永远放行账号";
+      allowButton.textContent = "永久放行";
       allowButton.title = `将 @${result.handle} 加入本地永远放行名单`;
+      allowButton.setAttribute(
+        "aria-label",
+        `永久放行账号 @${result.handle}`,
+      );
       allowButton.addEventListener("click", async (event) => {
         event.preventDefault();
         event.stopPropagation();
@@ -3655,16 +5247,26 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         const saved = await allowHandleLocally(result.handle);
         if (!saved) {
           allowButton.disabled = false;
-          allowButton.textContent = "永远放行账号";
+          allowButton.textContent = "永久放行";
           showToast("无法保存该账号", "error");
+        } else {
+          const article = cell.querySelector(SELECTOR.tweet);
+          const disabledRules = recordAiFalsePositiveFeedback(
+            result,
+            article ? articleStatusId(article) : "",
+          );
+          if (disabledRules.length > 0) {
+            showToast(
+              `账号已放行；同时停用误判 AI 规则：${disabledRules.join("、")}`,
+              "success",
+            );
+          }
         }
       });
-      actions.append(allowButton, restoreButton);
-
       // 本地放行只影响自己；命中公开名单时再给一个上游申诉入口，
       // 让误判能被 MXGA 维护者复核后从名单里摘掉。
-      const appealUrl = mxgaAppealUrl(result.handle);
-      if (appealUrl) {
+      const appealUrl = mxgaAppealUrl(result.handle, result.userId);
+      if (preferences.showAppealButton && appealUrl) {
         const appealLink = document.createElement("a");
         appealLink.className = "xps-appeal-account";
         appealLink.textContent = "向 MXGA 申诉";
@@ -3677,8 +5279,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         });
         actions.append(appealLink);
       }
-    } else {
-      actions.append(restoreButton);
+      actions.append(allowButton);
     }
 
     placeholder.append(copy, actions);
@@ -3704,7 +5305,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     rememberHiddenStatus(article, result, fp);
 
     if (CONFIG.debug) {
-      console.debug("[X Reply Purifier] hidden", {
+      console.debug("[Purify X] hidden", {
         score: result.score,
         reasons: result.reasons,
         name: result.name,
@@ -3741,6 +5342,23 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
   function rehydrateCachedHiddenArticle(article, statusId = "") {
     if (!(article instanceof HTMLElement)) return false;
     const currentStatusId = statusId || articleStatusId(article);
+    if (
+      currentStatusId &&
+      currentStatusId === statusIdFromLocation()
+    ) {
+      // 详情页主贴是用户主动打开的目标，即使旧版本曾缓存过隐藏结果，
+      // 重挂载时也必须丢弃，不能在完整扫描前再次预隐藏。
+      forgetHiddenStatus(currentStatusId);
+      return false;
+    }
+    if (
+      !statusIdFromLocation() &&
+      isFilterableTimeline() &&
+      !preferences.filterTimeline
+    ) {
+      forgetHiddenStatus(currentStatusId);
+      return false;
+    }
     const cached = cachedHiddenStatus(currentStatusId);
     if (!cached || restoredFingerprints.has(cached.fingerprint)) {
       if (cached && restoredFingerprints.has(cached.fingerprint)) {
@@ -3755,9 +5373,29 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       forgetHiddenStatus(currentStatusId);
       return false;
     }
-    // 缓存只来自此前已明确判定为“未关注”的同一回复。若关系状态
-    // 此刻变成关注或无法确认，宁可暂时显示，也绝不预先隐藏关注账号。
-    if (viewerFollowingState(article, handle) !== false) return false;
+    // 普通缓存只允许在明确未关注时预隐藏；高置信推广可继续处理明确已关注账号，
+    // 但当前账号自己和关系未知仍然 fail-open。
+    if (
+      shouldProtectAuthor({
+        following: viewerFollowingState(article, handle),
+        isSelf: Boolean(viewerHandle() && viewerHandle() === handle),
+        highConfidencePromotion: Boolean(
+          cached.result?.highConfidencePromotion,
+        ),
+      })
+    ) {
+      return false;
+    }
+    // 预隐藏同样不能绕过转推放行，否则关注账号转推的内容会在首屏闪一下。
+    const repostIdentity = articleRepostIdentity(
+      article,
+      handle,
+      currentStatusId,
+    );
+    if (repostProtectionState(article, repostIdentity, handle)) {
+      forgetHiddenStatus(currentStatusId);
+      return false;
+    }
 
     annotateReplyResult(article, cached.result, handle);
     hideArticle(
@@ -3774,17 +5412,18 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     }
 
     const mainStatusId = statusIdFromLocation();
-    const timelineMode = !mainStatusId && isFilterableTimeline();
     const currentStatusId = articleStatusId(article);
+    const filterScope = articleFilterScope({
+      mainStatusId,
+      currentStatusId,
+      timelineEligible: isFilterableTimeline(),
+      filterTimeline: preferences.filterTimeline,
+    });
+    const timelineMode = filterScope === "timeline";
     const handle = articleHandle(article);
-    if (!mainStatusId && !timelineMode) {
+    if (filterScope === "none") {
       annotateReplyResult(article, null, handle);
       unhideArticle(article, "visible");
-      return;
-    }
-    if (currentStatusId === mainStatusId) {
-      annotateReplyResult(article, null, handle);
-      unhideArticle(article, "protected-thread");
       return;
     }
 
@@ -3794,12 +5433,44 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       coordinatedBurstStatusIds.has(currentStatusId);
     const repeatedLowInfo =
       repeatedLowInfoStatusIds.has(currentStatusId);
+    const duplicateTemplate =
+      duplicateTemplateStatusIds.has(currentStatusId);
+    const promotionSignals = articlePromotionSignals(
+      article,
+      currentStatusId,
+      text,
+    );
+    const promotion = promotionPattern(text, promotionSignals);
+    const identity = articleRelationshipIdentity(article, handle);
+    const userId = identity.userId;
+    const repostIdentity = articleRepostIdentity(
+      article,
+      handle,
+      currentStatusId,
+    );
+    const repostHandle = repostIdentity.handle;
+    const quotedIdentity = articleQuotedIdentity(
+      article,
+      handle,
+      currentStatusId,
+    );
+    const quotedAccount = quotedIdentity.isQuote
+      ? relatedAccountVerdict(quotedIdentity)
+      : null;
+    const primaryAccountListed =
+      accountSourceNames(handle, userId).length > 0;
+    const contentPolicy = contentPolicyForSurface({
+      scope: filterScope,
+      primaryAccountListed,
+      relatedAccountListed: Boolean(quotedAccount),
+      highConfidencePromotion: promotion.highConfidence,
+    });
     const aiKey = aiDecisionKey(text, name, handle);
     const aiDecision = cachedAiDecision(aiKey);
     const fp = fingerprint(
       article,
       text,
-      `${name}|${handle}|burst:${coordinatedBurst ? 1 : 0}|repeat:${repeatedLowInfo ? 1 : 0}|ai:${aiDecision?.isSpam ? 1 : 0}`,
+      `${name}|${handle}|uid:${userId}|rt:${repostHandle}|qt:${quotedAccount?.handle || ""}:${quotedAccount?.userId || ""}:${quotedAccount?.points || 0}|burst:${coordinatedBurst ? 1 : 0}|repeat:${repeatedLowInfo ? 1 : 0}|dup:${duplicateTemplate ? 1 : 0}|restricted:${promotion.repliesRestricted ? 1 : 0}|external:${promotion.hasExternalLink ? 1 : 0}|telegram:${promotion.telegramLink ? 1 : 0}|promo:${promotion.promotionCopy ? 1 : 0}|ai:${aiDecision?.isSpam ? 1 : 0}`,
     );
 
     const cell = findCell(article);
@@ -3807,25 +5478,50 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const previousState = article.getAttribute(ATTRIBUTE.state);
 
     if (accountIsLocallyAllowed(handle)) {
-      annotateReplyResult(article, null, handle);
+      annotateReplyResult(article, null, handle, userId);
       article.setAttribute(ATTRIBUTE.fingerprint, fp);
       article.setAttribute(ATTRIBUTE.following, "local-allow");
       unhideArticle(article, "protected-local-allow");
       return;
     }
 
-    // Timeline 只按公开账号名单隐藏，避免把一次命中本地内容关键词的
-    // 普通账号整条从 For You / Following 信息流中移除。
-    if (timelineMode && accountSourceNames(handle).length === 0) {
-      annotateReplyResult(article, null, handle);
+    const self = viewerHandle();
+    if (self && self === handle) {
+      annotateReplyResult(article, null, handle, userId);
+      article.setAttribute(ATTRIBUTE.fingerprint, fp);
+      article.setAttribute(ATTRIBUTE.following, "self");
+      unhideArticle(article, "protected-self");
+      return;
+    }
+
+    // 策略层只决定当前页面是否允许进入评分：回复运行完整规则；时间线需要
+    // 账号名单证据或「关闭评论 + 外链 + 推广话术」组合。详情页主贴始终放行。
+    if (contentPolicy === "none") {
+      annotateReplyResult(article, null, handle, userId);
       article.setAttribute(ATTRIBUTE.fingerprint, fp);
       unhideArticle(article, "visible");
       return;
     }
 
-    const followingState = viewerFollowingState(article, handle);
-    if (followingState !== false) {
-      annotateReplyResult(article, null, handle);
+    // 转推判定放在 timeline 快速放行之后：读取转推者关系可能要遍历 React
+    // fiber，只有真正可能被隐藏的内容才值得付这个成本。
+    const repostState = repostProtectionState(article, repostIdentity, handle);
+    if (repostState) {
+      annotateReplyResult(article, null, handle, userId);
+      article.setAttribute(ATTRIBUTE.fingerprint, fp);
+      article.setAttribute(ATTRIBUTE.following, repostState);
+      unhideArticle(article, repostState);
+      return;
+    }
+
+    const followingState = identity.following;
+    if (
+      shouldProtectAuthor({
+        following: followingState,
+        highConfidencePromotion: promotion.highConfidence,
+      })
+    ) {
+      annotateReplyResult(article, null, handle, userId);
       article.setAttribute(ATTRIBUTE.fingerprint, fp);
       article.setAttribute(
         ATTRIBUTE.following,
@@ -3856,7 +5552,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     ) {
       const cached = cachedHiddenStatus(currentStatusId);
       if (previousState === "hidden" && cached?.result) {
-        annotateReplyResult(article, cached.result, handle);
+        annotateReplyResult(article, cached.result, handle, userId);
       }
       return;
     }
@@ -3868,25 +5564,47 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       text,
       name,
       handle,
+      userId,
       coordinatedBurst,
       repeatedLowInfo,
+      duplicateTemplate,
+      repliesRestricted: promotion.repliesRestricted,
+      hasExternalLink: promotion.hasExternalLink,
+      telegramLink: promotion.telegramLink,
       tweetsTranslated,
       aiDecision,
+      quotedAccount,
     });
     let result = getCachedDecisionResult(resultCacheKey);
+    let computedResult = false;
     if (!result) {
       result = scoreReply(text, name, handle, {
         coordinatedBurst,
         repeatedLowInfo,
+        duplicateTemplate,
+        repliesRestricted: promotion.repliesRestricted,
+        hasExternalLink: promotion.hasExternalLink,
+        telegramLink: promotion.telegramLink,
+        userId,
         aiDecision,
         tweetsTranslated,
+        quotedAccount,
       });
       setCachedDecisionResult(resultCacheKey, result);
+      computedResult = true;
+    }
+    if (computedResult && result.learnedRuleHits?.length) {
+      recordAiLearnedRuleHits(result.learnedRuleHits, currentStatusId);
     }
     if (timelineMode) {
-      result = { ...result, itemLabel: "低质量账号内容" };
+      result = {
+        ...result,
+        itemLabel: promotion.highConfidence
+          ? "推广内容"
+          : "低质量账号内容",
+      };
     }
-    annotateReplyResult(article, result, handle);
+    annotateReplyResult(article, result, handle, userId);
     if (result.score >= CONFIG.threshold && !restoredFingerprints.has(fp)) {
       hideArticle(article, result, fp);
     } else {
@@ -3894,7 +5612,11 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         article,
         restoredFingerprints.has(fp) ? "restored" : "visible",
       );
-      if (!timelineMode && !aiDecision && !restoredFingerprints.has(fp)) {
+      if (
+        !timelineMode &&
+        !aiDecision &&
+        !restoredFingerprints.has(fp)
+      ) {
         maybeScheduleAiEvaluation(article, {
           text,
           name,
@@ -4027,12 +5749,14 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     // continuous run of filtered replies. Build the order from top-level
     // tweet articles instead, then map each article back to its owning cell.
     const orderedCells = [];
+    const cellOrder = new Map();
     const seenCells = new Set();
     for (const article of document.querySelectorAll(SELECTOR.tweet)) {
       if (!isTopLevelTweetArticle(article)) continue;
       const cell = findCell(article);
       if (!(cell instanceof HTMLElement) || seenCells.has(cell)) continue;
       seenCells.add(cell);
+      cellOrder.set(cell, orderedCells.length);
       orderedCells.push(cell);
     }
     const desired = new Map();
@@ -4040,7 +5764,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
 
     const commitRun = () => {
       if (run.length >= CONFIG.minGroupSize) {
-        const id = groupIdFor(run[0], orderedCells.indexOf(run[0]));
+        const id = groupIdFor(run[0], cellOrder.get(run[0]) || 0);
         const reasonSummary = summarizeRunEvidence(run);
         run.forEach((cell, index) => {
           desired.set(cell, {
@@ -4086,15 +5810,235 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     button.setAttribute(
       "aria-label",
       revealAll
-        ? `回复净化器：重新隐藏 ${hiddenCount} 条可疑内容`
-        : `回复净化器：临时显示 ${hiddenCount} 条可疑内容`,
+        ? `Purify X：重新隐藏 ${hiddenCount} 条可疑内容`
+        : `Purify X：临时显示 ${hiddenCount} 条可疑内容`,
     );
     button.title = revealAll
-      ? `回复净化器 · 点击重新隐藏 ${hiddenCount} 条回复；右键打开设置`
-      : `回复净化器 · 已隐藏 ${hiddenCount} 条；点击临时显示；右键打开设置`;
+      ? `Purify X · 点击重新隐藏 ${hiddenCount} 条回复；右键打开设置`
+      : `Purify X · 已隐藏 ${hiddenCount} 条；点击临时显示；右键打开设置`;
+  }
+
+  function shouldRepairCollapsedMultiImageLayout({
+    photoCount,
+    containerWidth,
+    parentWidth,
+    alreadyRepaired = false,
+  }) {
+    const count = Number(photoCount);
+    const width = Number(containerWidth);
+    const availableWidth = Number(parentWidth);
+    return Boolean(
+      !alreadyRepaired &&
+        Number.isInteger(count) &&
+        count >= 2 &&
+        Number.isFinite(width) &&
+        width >= 0 &&
+        width <= CONFIG.mediaCollapsedMaxWidthPx &&
+        Number.isFinite(availableWidth) &&
+        availableWidth >= CONFIG.mediaParentMinWidthPx,
+    );
+  }
+
+  function statusPhotoIdentity(link) {
+    if (!(link instanceof Element)) return null;
+    const href = link.getAttribute("href") || "";
+    const match = href.match(
+      /\/status\/(\d+)\/photo\/(\d+)(?:[/?#]|$)/,
+    );
+    if (!match) return null;
+    return { statusId: match[1], photoIndex: match[2] };
+  }
+
+  function photoIndexesForStatus(root, statusId) {
+    const indexes = new Set();
+    for (const link of root.querySelectorAll?.(
+      'a[href*="/status/"][href*="/photo/"]',
+    ) || []) {
+      const identity = statusPhotoIdentity(link);
+      if (identity?.statusId === statusId) indexes.add(identity.photoIndex);
+    }
+    return indexes;
+  }
+
+  function repairCollapsedMultiImageLayouts(articles) {
+    let repairedCount = 0;
+    for (const article of articles) {
+      if (!(article instanceof Element)) continue;
+
+      const groups = new Map();
+      for (const link of article.querySelectorAll(
+        'a[href*="/status/"][href*="/photo/"]',
+      )) {
+        const identity = statusPhotoIdentity(link);
+        if (!identity) continue;
+        if (!groups.has(identity.statusId)) {
+          groups.set(identity.statusId, new Map());
+        }
+        groups.get(identity.statusId).set(identity.photoIndex, link);
+      }
+
+      // X 的新横向轮播会让每张图片位于独立 slide，因此修复节点本身
+      // 可能只包含一张图。虚拟列表复用时同时核对整条推文仍是多图、
+      // 该 slide 仍承载原 status，避免把满宽规则带到无关卡片。
+      for (const host of article.querySelectorAll(
+        `.${CLASS.mediaWidthFix}`,
+      )) {
+        const statusId = host.getAttribute(ATTRIBUTE.mediaStatus) || "";
+        if (
+          (groups.get(statusId)?.size || 0) < 2 ||
+          photoIndexesForStatus(host, statusId).size < 1
+        ) {
+          host.classList.remove(CLASS.mediaWidthFix);
+          host.removeAttribute(ATTRIBUTE.mediaStatus);
+        }
+      }
+
+      for (const [statusId, photoLinks] of groups) {
+        const links = [...photoLinks.values()];
+        if (links.length < 2) continue;
+
+        for (const link of links) {
+          if (
+            link.closest(`.${CLASS.mediaWidthFix}`)?.getAttribute(
+              ATTRIBUTE.mediaStatus,
+            ) === statusId
+          ) {
+            continue;
+          }
+
+          let candidate = link;
+          while (candidate && candidate !== article) {
+            const parent = candidate.parentElement;
+            if (!parent || !article.contains(parent)) break;
+            if (
+              shouldRepairCollapsedMultiImageLayout({
+                photoCount: links.length,
+                containerWidth: candidate.getBoundingClientRect().width,
+                parentWidth: parent.getBoundingClientRect().width,
+                alreadyRepaired: candidate.classList.contains(
+                  CLASS.mediaWidthFix,
+                ),
+              })
+            ) {
+              candidate.classList.add(CLASS.mediaWidthFix);
+              candidate.setAttribute(ATTRIBUTE.mediaStatus, statusId);
+              repairedCount += 1;
+              break;
+            }
+            candidate = parent;
+          }
+        }
+      }
+    }
+    return repairedCount;
+  }
+
+  function mediaControlLabel(control) {
+    return (
+      control?.getAttribute?.("aria-label") ||
+      control?.textContent ||
+      control?.getAttribute?.("title") ||
+      ""
+    );
+  }
+
+  function mediaPhotosOption(root = document) {
+    const selectors = [
+      '[role="menuitem"]',
+      '[role="option"]',
+      '[role="menu"] button',
+      '[data-testid*="Dropdown"] button',
+      '[data-testid*="dropdown"] button',
+    ].join(",");
+    for (const control of root.querySelectorAll?.(selectors) || []) {
+      if (mediaSubtabKind(mediaControlLabel(control)) === "photos") {
+        return control;
+      }
+    }
+    return null;
+  }
+
+  function mediaProfileTab(root, kind) {
+    for (const tablist of root.querySelectorAll?.('[role="tablist"]') || []) {
+      for (const control of tablist.querySelectorAll('[role="tab"], button')) {
+        if (mediaSubtabKind(mediaControlLabel(control)) === kind) {
+          return control;
+        }
+      }
+    }
+    return null;
+  }
+
+  function applyMediaPhotosDefault() {
+    if (!mediaPhotosDefaultPending) return false;
+    if (!isProfileMediaPath(location.pathname)) {
+      mediaPhotosDefaultPending = false;
+      mediaPhotosMenuRequested = false;
+      return false;
+    }
+    const photosTab = mediaProfileTab(document, "photos");
+    const photosMenuOption = mediaPhotosOption();
+    const videosTrigger = mediaProfileTab(document, "videos");
+    const action = mediaPhotosDefaultAction({
+      pathname: location.pathname,
+      photosSelected: photosTab?.getAttribute("aria-selected") === "true",
+      hasPhotosOption: Boolean(photosMenuOption),
+      hasVideosTrigger: Boolean(videosTrigger),
+      menuRequested: mediaPhotosMenuRequested,
+    });
+
+    if (action === "done") {
+      mediaPhotosDefaultPending = false;
+      mediaPhotosMenuRequested = false;
+      return false;
+    }
+    if (action === "select-photos") {
+      mediaPhotosDefaultPending = false;
+      mediaPhotosMenuRequested = false;
+      photosMenuOption.click();
+      return true;
+    }
+    if (action === "open-videos-menu") {
+      mediaPhotosMenuRequested = true;
+      videosTrigger.click();
+      // 下拉菜单由 portal 异步挂载；即使 X 的菜单节点没有稳定 role，
+      // 也在几次短延迟后重查，且不会重复点击 Videos 把菜单关掉。
+      for (const delay of [80, 220, 600]) {
+        window.setTimeout(() => {
+          if (mediaPhotosDefaultPending) scheduleScan();
+        }, delay);
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function cancelMediaPhotosDefaultOnUserChoice(event) {
+    if (
+      !event.isTrusted ||
+      !mediaPhotosDefaultPending ||
+      !isProfileMediaPath(location.pathname)
+    ) {
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    const control = target?.closest('[role="tab"], button');
+    if (!control) return;
+    const label =
+      control.getAttribute("aria-label") ||
+      control.textContent ||
+      control.getAttribute("title") ||
+      "";
+    if (mediaSubtabKind(label)) {
+      mediaPhotosDefaultPending = false;
+      mediaPhotosMenuRequested = false;
+    }
   }
 
   function scan(root = document) {
+    applyMediaPhotosDefault();
+    // 只在同一轮扫描内复用 React roots；X 回收 DOM 后下一轮必须重新读取。
+    scanReactRootsCache = new WeakMap();
     annotateProfileAccount();
     const articles = [];
     if (root instanceof Element && root.matches(SELECTOR.tweet)) {
@@ -4103,10 +6047,14 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     for (const article of root.querySelectorAll?.(SELECTOR.tweet) || []) {
       if (article !== root) articles.push(article);
     }
+    repairCollapsedMultiImageLayouts(articles);
 
     if (!statusIdFromLocation() && !isFilterableTimeline()) {
+      threadBehaviorContextId = "";
+      threadBehaviorRecordCache.clear();
       coordinatedBurstStatusIds = new Set();
       repeatedLowInfoStatusIds = new Set();
+      duplicateTemplateStatusIds = new Set();
       for (const article of articles) annotateTweetListedAccount(article);
       for (const cell of filteredCells) {
         cell.classList.remove(
@@ -4126,8 +6074,22 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       return;
     }
 
-    if (statusIdFromLocation()) {
-      const signals = detectReplyBehaviorSignals(articles);
+    const threadId = statusIdFromLocation();
+    if (threadId) {
+      if (threadBehaviorContextId !== threadId) {
+        threadBehaviorContextId = threadId;
+        threadBehaviorRecordCache.clear();
+        coordinatedBurstStatusIds.clear();
+        repeatedLowInfoStatusIds.clear();
+        duplicateTemplateStatusIds.clear();
+      }
+      mergeBehaviorRecordCache(
+        threadBehaviorRecordCache,
+        replyBehaviorRecords(articles),
+      );
+      const signals = computeReplyBehaviorSignals([
+        ...threadBehaviorRecordCache.values(),
+      ]);
       // X 会在滚动时回收回复 DOM。已经观察到的行为信号在当前详情页内
       // 保持为真，避免某条回复因暂时离开 DOM 而在隐藏/显示之间反复切换。
       for (const id of signals.coordinated) {
@@ -4136,9 +6098,15 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       for (const id of signals.repeated) {
         repeatedLowInfoStatusIds.add(id);
       }
+      for (const id of signals.duplicated) {
+        duplicateTemplateStatusIds.add(id);
+      }
     } else {
+      threadBehaviorContextId = "";
+      threadBehaviorRecordCache.clear();
       coordinatedBurstStatusIds = new Set();
       repeatedLowInfoStatusIds = new Set();
+      duplicateTemplateStatusIds = new Set();
     }
     for (const article of articles) processArticle(article);
 
@@ -4170,7 +6138,13 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       SELECTOR.cell,
       SELECTOR.tweetText,
       SELECTOR.userName,
+      'a[href*="/status/"][href*="/photo/"]',
       "time",
+      '[role="tablist"]',
+      '[role="tab"]',
+      '[role="menu"]',
+      '[role="menuitem"]',
+      '[role="option"]',
       '[data-testid$="-follow"]',
       '[data-testid$="-unfollow"]',
     ].join(",");
@@ -4328,31 +6302,45 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         display: none !important;
       }
 
+      /* X 的横向多图轮播偶尔漏掉原生 width: 100% class，外层会缩成
+         只剩 2px 边框。JS 只给已确认塌缩的多图节点加此 class。 */
+      .${CLASS.mediaWidthFix} {
+        width: 100% !important;
+      }
+
+      /* 图片查看器和分栏视图会把回复区压得很窄。允许换行，让按钮整体
+         落到第二行，而不是把左侧文案挤成逐字竖排。 */
       .${CLASS.placeholder} {
         box-sizing: border-box;
         width: 100%;
         min-height: 58px;
         padding: 12px 16px;
         display: flex;
+        flex-wrap: wrap;
         align-items: center;
         justify-content: space-between;
-        gap: 12px;
+        gap: 8px 12px;
         color: rgb(113, 118, 123);
         background: rgba(29, 155, 240, 0.045);
         border-bottom: 1px solid rgb(47, 51, 54);
         font: 13px/1.35 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
 
+      /* flex-basis 同时是换行阈值：左侧文案挤到 200px 以下时，
+         整块按钮换到第二行，而不是继续压缩文案。 */
       .xps-placeholder-copy {
         min-width: 0;
         display: flex;
-        flex: 1 1 auto;
+        flex: 1 1 200px;
         flex-direction: column;
         gap: 3px;
       }
 
       .xps-placeholder-label {
+        overflow: hidden;
         font-weight: 650;
+        text-overflow: ellipsis;
+        white-space: nowrap;
       }
 
       .xps-placeholder-reason {
@@ -4392,6 +6380,37 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         align-items: center !important;
         justify-content: flex-start !important;
         white-space: nowrap !important;
+      }
+
+      /* 图片查看器把推文放进窄侧栏，但浏览器视口本身仍然很宽，普通
+         viewport media query 无法命中。弹层里优先保留 X 原生身份信息：
+         显示名至少露出一段，并隐藏可在普通推文页完成的二级放行操作。 */
+      [aria-modal="true"] .xps-account-name-link,
+      [role="dialog"] .xps-account-name-link {
+        min-width: 64px !important;
+        overflow: hidden;
+      }
+
+      [aria-modal="true"] .${CLASS.accountBadge},
+      [role="dialog"] .${CLASS.accountBadge} {
+        width: 20px;
+        margin-left: 4px;
+        padding: 0;
+        flex: 0 0 20px;
+        justify-content: center;
+        overflow: hidden;
+        font-size: 0;
+      }
+
+      [aria-modal="true"] .${CLASS.accountBadge}::after,
+      [role="dialog"] .${CLASS.accountBadge}::after {
+        content: attr(data-xps-compact-label);
+        font: 650 11px/1 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      [aria-modal="true"] .xps-account-allow,
+      [role="dialog"] .xps-account-allow {
+        display: none !important;
       }
 
       .${CLASS.accountBadge}[data-xps-kind="reply"] {
@@ -4435,6 +6454,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         cursor: pointer;
         font: inherit;
         font-weight: 600;
+        white-space: nowrap;
       }
 
       .${CLASS.placeholder} button:hover {
@@ -4442,12 +6462,15 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       }
 
       .${CLASS.placeholder} .xps-allow-account {
-        color: rgb(255, 122, 0);
-        border-color: rgba(255, 122, 0, 0.5);
+        padding-inline: 8px;
+        color: rgb(113, 118, 123);
+        border-color: transparent;
       }
 
       .${CLASS.placeholder} .xps-allow-account:hover {
-        background: rgba(255, 122, 0, 0.12);
+        color: rgb(83, 100, 113);
+        background: rgba(83, 100, 113, 0.1);
+        border-color: rgba(83, 100, 113, 0.45);
       }
 
       .xps-allow-account:disabled {
@@ -4472,10 +6495,15 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         text-decoration: none;
       }
 
+      /* 宽屏时靠右贴边；窄屏时整块换到第二行，再窄则按钮自己继续换行。
+         按钮本身始终 flex: 0 0 auto 且 nowrap，收缩只发生在这一层。 */
       .xps-placeholder-actions {
-        flex: 0 0 auto;
+        min-width: 0;
         display: inline-flex;
+        flex: 1 1 auto;
+        flex-wrap: wrap;
         align-items: center;
+        justify-content: flex-end;
         gap: 8px;
       }
 
@@ -4580,7 +6608,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         background: rgb(0, 0, 0);
         border: 1px solid rgb(47, 51, 54);
         border-radius: 16px;
-        box-shadow: 0 16px 60px rgba(0, 0, 0, 0.55);
+        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.42);
       }
 
       #xps-settings-panel header,
@@ -4634,6 +6662,14 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       #xps-settings-panel button:disabled {
         cursor: wait;
         opacity: 0.6;
+      }
+
+      #xps-settings-panel button:focus-visible,
+      #xps-settings-panel input:focus-visible,
+      #xps-settings-panel textarea:focus-visible,
+      .xps-source-card:has(input:focus-visible) {
+        outline: 2px solid rgb(29, 155, 240);
+        outline-offset: 2px;
       }
 
       #xps-settings-panel header button {
@@ -4724,7 +6760,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         color: white;
         background: rgb(29, 155, 240);
         border-color: rgb(29, 155, 240);
-        animation: xps-check-pop 0.28s cubic-bezier(.2,.8,.2,1);
       }
 
       .xps-source-copy {
@@ -4891,7 +6926,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         color: rgb(0, 186, 124);
         background: rgba(0, 186, 124, 0.09);
         border-color: rgba(0, 186, 124, 0.45);
-        animation: xps-success-pulse 0.5s ease;
       }
 
       #xps-settings-feedback[data-state="loading"] {
@@ -4917,6 +6951,18 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         font-weight: 900;
       }
 
+      .xps-feedback-spinner {
+        width: 16px;
+        height: 16px;
+        display: block;
+        fill: none;
+        stroke: currentColor;
+        stroke-width: 2.25;
+        stroke-linecap: round;
+        stroke-dasharray: 72 28;
+        transform-origin: 50% 50%;
+      }
+
       #xps-settings-feedback[data-state="success"] .xps-feedback-icon,
       #xps-toast[data-state="success"] .xps-feedback-icon {
         color: white;
@@ -4935,7 +6981,12 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       }
 
       #xps-settings-feedback[data-state="loading"] .xps-feedback-icon {
-        animation: xps-spin 0.9s linear infinite;
+        background: transparent;
+      }
+
+      #xps-settings-feedback[data-state="loading"] .xps-feedback-spinner,
+      #xps-toast[data-state="loading"] .xps-feedback-spinner {
+        animation: xps-spin 0.8s linear infinite;
       }
 
       #xps-settings-panel footer {
@@ -4960,11 +7011,11 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         color: rgb(231, 233, 234);
         background: rgb(22, 24, 28);
         border: 1px solid rgb(47, 51, 54);
-        border-radius: 9999px;
-        box-shadow: 0 8px 30px rgba(0, 0, 0, 0.4);
+        border-radius: 10px;
+        box-shadow: 0 6px 20px rgba(0, 0, 0, 0.32);
         font: 650 13px/1.3 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         transform: translate(-50%, 0);
-        animation: xps-toast-in 0.32s cubic-bezier(.2,.8,.2,1);
+        animation: xps-toast-in 0.2s cubic-bezier(.2,.8,.2,1);
       }
 
       #xps-toast[data-state="success"] {
@@ -4979,18 +7030,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         opacity: 0;
         transform: translate(-50%, -8px);
         transition: opacity 0.22s ease, transform 0.22s ease;
-      }
-
-      @keyframes xps-check-pop {
-        0% { transform: scale(0.65); }
-        70% { transform: scale(1.12); }
-        100% { transform: scale(1); }
-      }
-
-      @keyframes xps-success-pulse {
-        0% { transform: scale(0.985); }
-        55% { transform: scale(1.008); }
-        100% { transform: scale(1); }
       }
 
       @keyframes xps-spin {
@@ -5033,6 +7072,25 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         .xps-settings-footer-spacer {
           display: none;
         }
+
+        #xps-settings-panel footer button {
+          white-space: nowrap;
+        }
+      }
+
+      @media (prefers-reduced-motion: reduce) {
+        #xps-counter,
+        #xps-settings-feedback,
+        #xps-toast,
+        #xps-toast.xps-toast-out {
+          animation-duration: 0.01ms !important;
+          transition-duration: 0.01ms !important;
+        }
+
+        .xps-feedback-spinner {
+          animation: none !important;
+          stroke-dasharray: 50 50;
+        }
       }
     `;
     document.documentElement.append(style);
@@ -5062,19 +7120,183 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     updateCounter();
   }
 
+  function captureTimelineReturnSnapshot(event) {
+    if (
+      statusIdFromLocation() ||
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) {
+      return;
+    }
+
+    const target = event.target instanceof Element ? event.target : null;
+    const article = target?.closest(SELECTOR.tweet);
+    if (!article || !isTopLevelTweetArticle(article)) return;
+
+    const explicitLink = target.closest("a[href]");
+    let targetHref = explicitLink?.href || "";
+    let targetStatusId = detailNavigationStatusId(location.href, targetHref);
+    if (explicitLink && !targetStatusId) return;
+
+    if (!explicitLink) {
+      if (
+        target.closest(
+          'button, [role="button"], input, select, textarea, [contenteditable="true"]',
+        )
+      ) {
+        return;
+      }
+      targetHref =
+        article
+          .querySelector("time")
+          ?.closest("a[href*='/status/']")?.href || "";
+      targetStatusId = detailNavigationStatusId(location.href, targetHref);
+    }
+    if (!targetStatusId) return;
+
+    const sourceStatusId = articleStatusId(article);
+    const anchorTop = article.getBoundingClientRect().top;
+    if (!sourceStatusId || !Number.isFinite(anchorTop)) return;
+
+    timelineReturnSnapshot = {
+      sourceHref: location.href,
+      sourceStatusId,
+      targetStatusId,
+      scrollY: window.scrollY,
+      anchorTop,
+      capturedAt: Date.now(),
+    };
+  }
+
+  function articleForStatusId(statusId) {
+    if (!statusId) return null;
+    for (const article of document.querySelectorAll(SELECTOR.tweet)) {
+      if (
+        isTopLevelTweetArticle(article) &&
+        articleStatusId(article) === statusId
+      ) {
+        return article;
+      }
+    }
+    return null;
+  }
+
+  function cancelTimelineReturnRestore(forgetSnapshot = false) {
+    timelineReturnRestoreToken += 1;
+    timelineReturnInteractionCleanup?.();
+    timelineReturnInteractionCleanup = null;
+    if (forgetSnapshot) timelineReturnSnapshot = null;
+  }
+
+  function scheduleTimelineReturnRestore() {
+    const snapshot = timelineReturnSnapshot;
+    if (
+      !timelineReturnSnapshotIsCurrent(snapshot, location.href, Date.now())
+    ) {
+      return;
+    }
+
+    cancelTimelineReturnRestore();
+    const token = timelineReturnRestoreToken;
+    const cancelOnInteraction = () => {
+      if (token === timelineReturnRestoreToken) {
+        cancelTimelineReturnRestore(true);
+      }
+    };
+    const interactionEvents = ["wheel", "touchstart", "pointerdown", "keydown"];
+    for (const type of interactionEvents) {
+      window.addEventListener(type, cancelOnInteraction, {
+        capture: true,
+        passive: true,
+      });
+    }
+    timelineReturnInteractionCleanup = () => {
+      for (const type of interactionEvents) {
+        window.removeEventListener(type, cancelOnInteraction, true);
+      }
+    };
+
+    CONFIG.timelineReturnRestoreDelaysMs.forEach((delay, index, delays) => {
+      window.setTimeout(() => {
+        if (
+          token !== timelineReturnRestoreToken ||
+          !timelineReturnSnapshotIsCurrent(snapshot, location.href, Date.now())
+        ) {
+          return;
+        }
+
+        const anchor = articleForStatusId(snapshot.sourceStatusId);
+        const delta = timelineReturnScrollDelta({
+          savedScrollY: snapshot.scrollY,
+          currentScrollY: window.scrollY,
+          savedAnchorTop: snapshot.anchorTop,
+          currentAnchorTop: anchor?.getBoundingClientRect().top ?? null,
+        });
+        // 第一轮若还留着详情页的旧 DOM，先等 X 换回列表；后续找不到
+        // 锚点时才用绝对位置把虚拟列表带回原渲染窗口。
+        if (
+          (anchor || index > 0) &&
+          Math.abs(delta) > CONFIG.timelineReturnTolerancePx
+        ) {
+          window.scrollBy(0, delta);
+        }
+
+        if (index === delays.length - 1) {
+          timelineReturnInteractionCleanup?.();
+          timelineReturnInteractionCleanup = null;
+        }
+      }, delay);
+    });
+  }
+
   function installNavigationHook() {
     let previousUrl = location.href;
-    const checkNavigation = () => {
+    mediaPhotosDefaultPending = isProfileMediaPath(location.pathname);
+    mediaPhotosMenuRequested = false;
+    document.addEventListener("click", captureTimelineReturnSnapshot, true);
+    document.addEventListener(
+      "click",
+      cancelMediaPhotosDefaultOnUserChoice,
+      true,
+    );
+
+    const checkNavigation = (event) => {
       if (location.href === previousUrl) return;
+      const previousPathname = new URL(previousUrl).pathname;
       previousUrl = location.href;
+      mediaPhotosDefaultPending =
+        !isProfileMediaPath(previousPathname) &&
+        isProfileMediaPath(location.pathname);
+      mediaPhotosMenuRequested = false;
+      const restoreTimelineReturn =
+        event?.type === "popstate" &&
+        timelineReturnSnapshotIsCurrent(
+          timelineReturnSnapshot,
+          location.href,
+          Date.now(),
+        );
+      cancelTimelineReturnRestore();
       revealAll = false;
       restoredFingerprints.clear();
       expandedGroupIds.clear();
-      hiddenStatusCache.clear();
+      // hiddenStatusCache 的键已经包含 thread/timeline 上下文。保留它才能让
+      // 返回列表时在同一 MutationObserver 微任务内恢复原有行高，避免重新
+      // 判定后才折叠造成滚动锚点漂移；规则或名单变化仍会统一失效缓存。
+      threadBehaviorRecordCache.clear();
+      threadBehaviorContextId = "";
       coordinatedBurstStatusIds.clear();
       repeatedLowInfoStatusIds.clear();
+      duplicateTemplateStatusIds.clear();
+      aiRuleHitStatusKeys.clear();
+      aiRuleFalsePositiveStatusKeys.clear();
+      profileUserIdCache.clear();
       document.body.classList.remove(CLASS.revealAll);
       scheduleScan();
+      if (restoreTimelineReturn) scheduleTimelineReturnRestore();
     };
 
     window.addEventListener("popstate", checkNavigation);
@@ -5083,7 +7305,9 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
 
   const publicApi = Object.freeze({
     version: VERSION,
+    threshold: CONFIG.threshold,
     scoreReply,
+    computeReplyBehaviorSignals,
     accountSources: accountSourceNames,
     scan: () => scan(document),
     openSettings: openSettingsPanel,
@@ -5091,6 +7315,42 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     syncCustomSubscriptions,
     syncRemoteLists,
     remoteStatus: remoteStatusText,
+    ...(typeof document === "undefined"
+      ? {
+          test: Object.freeze({
+            actionIdentityFromMetadata,
+            articleFilterScope,
+            contentPolicyForSurface,
+            conversationReplyRestrictionFromReactObjects,
+            detailNavigationStatusId,
+            externalLinkSignals,
+            isProfileMediaPath,
+            keywordMatches,
+            mediaPhotosDefaultAction,
+            mediaSubtabKind,
+            mergeBehaviorRecordCache,
+            profileJsonLdUserId,
+            promotionPattern,
+            quotedIdentityFromReactObjects,
+            reconcileIdentitySourceBits,
+            relationshipFromReactObjects,
+            repostHandleFromContext,
+            repostIdentityFromReactObjects,
+            persistPreferences,
+            sanitizeAiState,
+            sanitizeRemoteCache,
+            sanitizePreferences,
+            shouldProtectAuthor,
+            shouldRepairCollapsedMultiImageLayout,
+            timelineReturnScrollDelta,
+            timelineReturnSnapshotIsCurrent,
+            updateAiLearnedRuleFeedback,
+            userIdFromReactUser,
+            validateMxgaLite,
+            validateMxgaWhitelist,
+          }),
+        }
+      : {}),
   });
 
   Object.defineProperty(globalThis, "__X_PORN_SPAM_FILTER__", {
@@ -5098,6 +7358,10 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     value: publicApi,
   });
   Object.defineProperty(globalThis, "__X_REPLY_PURIFIER__", {
+    configurable: true,
+    value: publicApi,
+  });
+  Object.defineProperty(globalThis, "__PURIFY_X__", {
     configurable: true,
     value: publicApi,
   });
@@ -5114,12 +7378,13 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     try {
       await Promise.all([
         initializeLocalLists(),
+        initializePreferences(),
         initializeAi(),
         initializeRemoteLists(),
       ]);
       await initializeDecisionCache();
     } catch (error) {
-      console.warn("[X Reply Purifier] cached state unavailable", error);
+      console.warn("[Purify X] cached state unavailable", error);
       decisionCacheRevision = computeDecisionCacheRevision();
       decisionCacheReady = true;
     }
