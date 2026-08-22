@@ -1,6 +1,6 @@
 {
   "name": "purify-x",
-  "version": "2.7.4",
+  "version": "2.7.5",
   "private": true,
   "description": "净化 X/Twitter 回复区的引流、诈骗与批量垃圾内容的油猴脚本",
   "license": "MIT",

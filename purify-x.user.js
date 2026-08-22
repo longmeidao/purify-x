@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.7.4
+// @version      2.7.5
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -24,7 +24,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.7.4";
+  const VERSION = "2.7.5";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -4040,6 +4040,14 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return true;
   }
 
+  function articleFilteringSurfaceEnabled({
+    threadId = "",
+    filterableTimeline = false,
+    profilePostTimeline = false,
+  } = {}) {
+    return Boolean(threadId || filterableTimeline || profilePostTimeline);
+  }
+
   function isProfileMediaPath(pathname = "") {
     const parts = String(pathname || "")
       .split("/")
@@ -5073,8 +5081,9 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     if (host !== container) host.classList.add("xps-account-badge-host");
     badge.dataset.xpsHandle = handle;
     badge.dataset.xpsKind = kind;
-    badge.dataset.xpsCompactLabel = kind === "list" ? "低" : "疑";
-    badge.textContent = label;
+    badge.dataset.xpsCompactLabel =
+      label === "推广内容" ? "广" : kind === "list" ? "低" : "疑";
+    badge.textContent = badge.dataset.xpsCompactLabel;
     badge.title = `Purify X\n@${handle}\n${details}`;
     badge.setAttribute("aria-label", `${label}：${details}`);
     if (!HANDLE_RE.test(handle)) return;
@@ -5086,24 +5095,25 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       allowButton.type = "button";
       allowButton.className = "xps-account-allow";
       allowButton.dataset.xpsContext = context;
-      allowButton.textContent = "永久放行";
+      allowButton.textContent = "放";
       allowButton.addEventListener("click", async (event) => {
         event.preventDefault();
         event.stopPropagation();
         const targetHandle = allowButton.dataset.xpsHandle;
         if (!targetHandle) return;
         allowButton.disabled = true;
-        allowButton.textContent = "保存中…";
+        allowButton.textContent = "…";
         const saved = await allowHandleLocally(targetHandle);
         if (!saved) {
           allowButton.disabled = false;
-          allowButton.textContent = "永久放行";
+          allowButton.textContent = "放";
           showToast("无法保存该账号", "error");
         }
       });
     }
     allowButton.dataset.xpsHandle = handle;
     allowButton.title = `将 @${handle} 永久加入本地放行名单`;
+    allowButton.setAttribute("aria-label", `永久放行账号 @${handle}`);
     if (allowButton.parentElement !== host || badge.nextElementSibling !== allowButton) {
       badge.after(allowButton);
     }
@@ -5362,6 +5372,10 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         appealLink.className = "xps-appeal-account";
         appealLink.textContent = "向 MXGA 申诉";
         appealLink.title = `@${result.handle} 命中 MXGA 公开名单，可在 GitHub 提交误判申诉`;
+        appealLink.setAttribute(
+          "aria-label",
+          `向 MXGA 申诉：@${result.handle}`,
+        );
         appealLink.href = appealUrl;
         appealLink.target = "_blank";
         appealLink.rel = "noopener noreferrer";
@@ -6166,7 +6180,14 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     }
     repairCollapsedMultiImageLayouts(articles);
 
-    if (!statusIdFromLocation() && !isFilterableTimeline()) {
+    const threadId = statusIdFromLocation();
+    if (
+      !articleFilteringSurfaceEnabled({
+        threadId,
+        filterableTimeline: isFilterableTimeline(),
+        profilePostTimeline: isProfilePostTimeline(),
+      })
+    ) {
       threadBehaviorContextId = "";
       threadBehaviorRecordCache.clear();
       coordinatedBurstStatusIds = new Set();
@@ -6191,7 +6212,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       return;
     }
 
-    const threadId = statusIdFromLocation();
     if (threadId) {
       if (threadBehaviorContextId !== threadId) {
         threadBehaviorContextId = threadId;
@@ -7436,6 +7456,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       ? {
           test: Object.freeze({
             actionIdentityFromMetadata,
+            articleFilteringSurfaceEnabled,
             articleFilterScope,
             contentPolicyForSurface,
             conversationReplyRestrictionFromReactObjects,

@@ -49,3 +49,19 @@ test("账号主页是推广过滤范围，但详情页主贴仍不是", () => {
     false,
   );
 });
+
+test("扫描入口不会跳过账号主页帖子列表", () => {
+  assert.equal(api.articleFilteringSurfaceEnabled(), false);
+  assert.equal(
+    api.articleFilteringSurfaceEnabled({ profilePostTimeline: true }),
+    true,
+  );
+  assert.equal(
+    api.articleFilteringSurfaceEnabled({ filterableTimeline: true }),
+    true,
+  );
+  assert.equal(
+    api.articleFilteringSurfaceEnabled({ threadId: "2091014885954269435" }),
+    true,
+  );
+});

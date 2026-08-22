@@ -214,8 +214,9 @@ test("图片查看器侧栏优先保留原生账号身份信息", () => {
   );
   assert.match(
     source,
-    /badge\.dataset\.xpsCompactLabel = kind === "list" \? "低" : "疑"/,
+    /badge\.dataset\.xpsCompactLabel =\s*label === "推广内容"\s*\? "广"\s*:\s*kind === "list"\s*\? "低"\s*:\s*"疑"/,
   );
+  assert.match(source, /badge\.textContent = badge\.dataset\.xpsCompactLabel/);
   assert.match(
     source,
     /\[aria-modal="true"\] \.\$\{CLASS\.accountBadge\},[\s\S]*?flex: 0 0 20px;/,
@@ -227,6 +228,27 @@ test("图片查看器侧栏优先保留原生账号身份信息", () => {
   assert.match(
     source,
     /link\.classList\.remove\("xps-account-name-link"\)/,
+  );
+});
+
+test("只压缩 handle 旁标志，回复占位操作保留完整文字", () => {
+  const source = fs.readFileSync(SCRIPT_PATH, "utf8");
+  assert.match(
+    source,
+    /allowButton\.className = "xps-account-allow";[\s\S]*?allowButton\.textContent = "放";/,
+  );
+  assert.match(source, /appealLink\.textContent = "向 MXGA 申诉"/);
+  assert.match(
+    source,
+    /allowButton\.className = "xps-allow-account";[\s\S]*?allowButton\.textContent = "永久放行";/,
+  );
+  assert.match(
+    source,
+    /appealLink\.setAttribute\(\s*"aria-label",\s*`向 MXGA 申诉：@\$\{result\.handle\}`/,
+  );
+  assert.match(
+    source,
+    /badge\.setAttribute\("aria-label", `\$\{label\}：\$\{details\}`\)/,
   );
 });
 
