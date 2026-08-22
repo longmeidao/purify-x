@@ -27,7 +27,7 @@ export const surfaceCases = [
 
 export const profileMediaRoutes = [
   { pathname: "/SMlnZhi/media", expected: true },
-  { pathname: "/longmeidao/media", expected: true },
+  { pathname: "/someuser/media", expected: true },
   { pathname: "/SMlnZhi/status/2085417452700307608", expected: false },
   { pathname: "/home/media", expected: false },
   { pathname: "/SMlnZhi/media/videos", expected: false },

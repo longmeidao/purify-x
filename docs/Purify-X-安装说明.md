@@ -81,7 +81,7 @@
 
 本地设置也可以导入、导出为 JSON。随附的
 `purify-x-local-list.example.json` 已收录本次人工核实的
-`@elhomie51` 和 `@albir101`，可在设置面板中导入；这两个账号不再硬编码进
+`@spam_account_1` 和 `@spam_account_2`（占位示例），可在设置面板中导入；示例账号不再硬编码进
 主 userscript。
 
 本地导入文件格式：
@@ -89,7 +89,7 @@
 ```json
 {
   "schema": 1,
-  "block": ["elhomie51", "albir101"],
+  "block": ["spam_account_1", "spam_account_2"],
   "allow": ["never_hide_me"],
   "keywords": ["自定义推广词组"],
   "subscriptions": [

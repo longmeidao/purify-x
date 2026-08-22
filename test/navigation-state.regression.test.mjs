@@ -12,21 +12,21 @@ test("只把同源推文详情识别为可返回的导航", () => {
   assert.equal(
     api.detailNavigationStatusId(
       source,
-      "https://x.com/longmeidao/status/2090000000000000001",
+      "https://x.com/someuser/status/2090000000000000001",
     ),
     "2090000000000000001",
   );
   assert.equal(
     api.detailNavigationStatusId(
       source,
-      "https://x.com/longmeidao/status/2090000000000000001/photo/1",
+      "https://x.com/someuser/status/2090000000000000001/photo/1",
     ),
     "",
   );
   assert.equal(
     api.detailNavigationStatusId(
       source,
-      "https://example.com/longmeidao/status/2090000000000000001",
+      "https://example.com/someuser/status/2090000000000000001",
     ),
     "",
   );
