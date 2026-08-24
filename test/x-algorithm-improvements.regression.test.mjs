@@ -167,6 +167,33 @@ test("自定义关键词支持 token、提及、hashtag、域名和重音归一"
   assert.equal(api.keywordMatches("Cafe promotion", "café"), true);
 });
 
+test("批量关键词预编译仍保留边界、顺序和解释上限", () => {
+  const keywords = new Set([
+    "art",
+    "诈骗长句",
+    "domain:bad.example",
+    "@spam_bot",
+  ]);
+  assert.deepEqual(
+    api.matchedKeywords(
+      "party 中出现诈骗长句，并访问 bad.example/path",
+      "hello @spam_bot",
+      keywords,
+      3,
+    ),
+    ["诈骗长句", "domain:bad.example", "@spam_bot"],
+  );
+  assert.deepEqual(api.matchedKeywords("party", "", keywords), []);
+  assert.deepEqual(
+    api.matchedKeywords(
+      "诈骗长句",
+      "",
+      new Set(["诈骗", "诈骗长句"]),
+    ),
+    ["诈骗", "诈骗长句"],
+  );
+});
+
 test("评分归一化移除完整 Unicode 默认可忽略字符类", () => {
   for (const invisible of ["\uFE00", "\u00AD", "\u2061"]) {
     const result = scoreReply("普通内容", `固${invisible}炮`, "spam_handle");

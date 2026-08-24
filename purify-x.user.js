@@ -336,6 +336,7 @@
   // 统一移除 Unicode 默认可忽略字符，避免变体选择器、软连字符、
   // 不可见运算符和 bidi 控制符被插入关键词或模板中规避判定。
   const DEFAULT_IGNORABLE_RE = /\p{Default_Ignorable_Code_Point}/gu;
+  const KEYWORD_TRIE_CHUNK_SIZE = 256;
   const EMOJI_RE = /\p{Extended_Pictographic}/gu;
   const CJK_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
   const LATIN_RE = /[a-z]/gi;
@@ -409,6 +410,9 @@
   const aiQueue = [];
   let activeAiRequests = 0;
   const decisionCache = new Map();
+  const keywordMatcherCache = new Map();
+  const keywordCollectionCache = new WeakMap();
+  let keywordMatcherGeneration = 0;
   // X 的虚拟列表会在滚动时销毁、重建或复用回复容器。持久判定缓存
   // 避免重复评分；这一层会额外记住当前规则版本下已隐藏的 status，
   // 让重新挂载的回复在浏览器绘制前直接恢复隐藏状态。
@@ -518,37 +522,123 @@
     return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   }
 
-  function keywordMatches(rawText, rawKeyword) {
-    const text = normalizeKeywordText(rawText);
+  function compiledKeywordMatcher(rawKeyword) {
     const keyword = normalizeKeywordText(rawKeyword);
-    if (!text || !keyword) return false;
-
-    if (keyword.startsWith("domain:")) {
-      const domain = keyword.slice(7).replace(/^www\./, "");
-      if (!/^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/i.test(domain)) return false;
-      const domainRe = new RegExp(
-        `(?:^|[^a-z0-9-])(?:www\\.)?${escapeRegExp(domain)}(?=[:/\\s]|$)`,
-        "i",
-      );
-      return domainRe.test(text);
+    if (keywordMatcherCache.has(keyword)) {
+      return keywordMatcherCache.get(keyword);
     }
 
-    if (/^[@#][a-z0-9_]{1,64}$/i.test(keyword)) {
+    let kind = "literal";
+    let regex = null;
+    if (!keyword) {
+      kind = "invalid";
+    } else if (keyword.startsWith("domain:")) {
+      const domain = keyword.slice(7).replace(/^www\./, "");
+      if (/^(?:[a-z0-9-]+\.)+[a-z]{2,63}$/i.test(domain)) {
+        kind = "regex";
+        regex = new RegExp(
+          `(?:^|[^a-z0-9-])(?:www\\.)?${escapeRegExp(domain)}(?=[:/\\s]|$)`,
+          "i",
+        );
+      } else {
+        kind = "invalid";
+      }
+    } else if (/^[@#][a-z0-9_]{1,64}$/i.test(keyword)) {
       const marker = keyword[0];
       const value = keyword.slice(1);
-      return new RegExp(
+      kind = "regex";
+      regex = new RegExp(
         `(?:^|[^a-z0-9_])${escapeRegExp(marker)}${escapeRegExp(value)}(?=$|[^a-z0-9_])`,
         "i",
-      ).test(text);
-    }
-
-    if (/^[a-z0-9_]+$/i.test(keyword)) {
-      return new RegExp(
+      );
+    } else if (/^[a-z0-9_]+$/i.test(keyword)) {
+      kind = "regex";
+      regex = new RegExp(
         `(?:^|[^a-z0-9_])${escapeRegExp(keyword)}(?=$|[^a-z0-9_])`,
         "i",
-      ).test(text);
+      );
     }
-    return text.includes(keyword);
+
+    const matcher = Object.freeze({ keyword, kind, regex });
+    if (keywordMatcherCache.size >= 50_000) keywordMatcherCache.clear();
+    keywordMatcherCache.set(keyword, matcher);
+    return matcher;
+  }
+
+  function keywordMatcherTest(normalizedText, matcher) {
+    if (!normalizedText || !matcher || matcher.kind === "invalid") {
+      return false;
+    }
+    return matcher.kind === "literal"
+      ? normalizedText.includes(matcher.keyword)
+      : matcher.regex.test(normalizedText);
+  }
+
+  function literalTriePattern(words) {
+    const root = { terminal: false, children: new Map() };
+    for (const word of words) {
+      let node = root;
+      for (const char of word) {
+        if (!node.children.has(char)) {
+          node.children.set(char, { terminal: false, children: new Map() });
+        }
+        node = node.children.get(char);
+      }
+      node.terminal = true;
+    }
+
+    const stringify = (node) => {
+      const branches = [...node.children.entries()].map(
+        ([char, child]) => `${escapeRegExp(char)}${stringify(child)}`,
+      );
+      if (branches.length === 0) return "";
+      const branch =
+        branches.length === 1 ? branches[0] : `(?:${branches.join("|")})`;
+      return node.terminal ? `(?:${branch})?` : branch;
+    };
+    return stringify(root);
+  }
+
+  function keywordCollectionIndex(keywords) {
+    const collection =
+      keywords && typeof keywords === "object" ? keywords : [];
+    const cached = keywordCollectionCache.get(collection);
+    if (cached?.generation === keywordMatcherGeneration) return cached;
+
+    const rules = [];
+    const literalKeywords = [];
+    for (const rawKeyword of collection) {
+      const matcher = compiledKeywordMatcher(rawKeyword);
+      rules.push({ rawKeyword, matcher });
+      if (matcher.kind === "literal") literalKeywords.push(matcher.keyword);
+    }
+
+    const literalGates = [];
+    for (
+      let index = 0;
+      index < literalKeywords.length;
+      index += KEYWORD_TRIE_CHUNK_SIZE
+    ) {
+      const pattern = literalTriePattern(
+        literalKeywords.slice(index, index + KEYWORD_TRIE_CHUNK_SIZE),
+      );
+      if (pattern) literalGates.push(new RegExp(pattern, "u"));
+    }
+
+    const compiled = Object.freeze({
+      generation: keywordMatcherGeneration,
+      rules,
+      literalGates,
+    });
+    if (collection && typeof collection === "object") {
+      keywordCollectionCache.set(collection, compiled);
+    }
+    return compiled;
+  }
+
+  function keywordMatches(rawText, rawKeyword) {
+    const text = normalizeKeywordText(rawText);
+    return keywordMatcherTest(text, compiledKeywordMatcher(rawKeyword));
   }
 
   function errorMessage(error) {
@@ -912,6 +1002,7 @@
   }
 
   function invalidateDecisionCache() {
+    keywordMatcherGeneration += 1;
     if (!decisionCacheReady) return false;
     const nextRevision = computeDecisionCacheRevision();
     if (nextRevision === decisionCacheRevision) return false;
@@ -3581,10 +3672,20 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
   }
 
   function matchedKeywords(text, name, keywords, limit = 3) {
+    const normalizedText = normalizeKeywordText(text);
+    const normalizedName = normalizeKeywordText(name);
+    const index = keywordCollectionIndex(keywords);
+    const literalPossible = index.literalGates.some(
+      (gate) => gate.test(normalizedText) || gate.test(normalizedName),
+    );
     const matches = [];
-    for (const keyword of keywords) {
-      if (keywordMatches(text, keyword) || keywordMatches(name, keyword)) {
-        matches.push(keyword);
+    for (const { rawKeyword, matcher } of index.rules) {
+      if (matcher.kind === "literal" && !literalPossible) continue;
+      if (
+        keywordMatcherTest(normalizedText, matcher) ||
+        keywordMatcherTest(normalizedName, matcher)
+      ) {
+        matches.push(rawKeyword);
         if (matches.length >= limit) break;
       }
     }
@@ -3592,6 +3693,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
   }
 
   function matchedAiLearnedRules(text, limit = 3, now = Date.now()) {
+    const normalizedText = normalizeKeywordText(text);
     const matches = [];
     for (const rule of aiState.learnedRules) {
       if (
@@ -3600,7 +3702,12 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       ) {
         continue;
       }
-      if (keywordMatches(text, rule.value)) {
+      if (
+        keywordMatcherTest(
+          normalizedText,
+          compiledKeywordMatcher(rule.value),
+        )
+      ) {
         matches.push(rule.value);
         if (matches.length >= limit) break;
       }
@@ -7512,6 +7619,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             isProfileMediaPath,
             isProfilePostTimeline,
             keywordMatches,
+            matchedKeywords,
             mediaPhotosDefaultAction,
             mediaSubtabKind,
             mergeBehaviorRecordCache,
