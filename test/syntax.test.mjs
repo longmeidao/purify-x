@@ -194,10 +194,12 @@ test("永久放行按钮缩短并固定在动作区最右侧", () => {
   assert.match(source, /allowButton\.textContent = "永久放行";/);
 
   const restoreIndex = source.indexOf("actions.append(restoreButton);");
+  const blockIndex = source.indexOf("actions.append(blockButton);");
   const appealIndex = source.indexOf("actions.append(appealLink);");
   const allowIndex = source.indexOf("actions.append(allowButton);");
   assert.ok(restoreIndex >= 0, "恢复此条未加入动作区");
-  assert.ok(appealIndex > restoreIndex, "申诉入口应位于恢复此条之后");
+  assert.ok(blockIndex > restoreIndex, "本地屏蔽应位于恢复此条之后");
+  assert.ok(appealIndex > blockIndex, "申诉入口应位于本地屏蔽之后");
   assert.ok(allowIndex > appealIndex, "永久放行应固定在动作区最右侧");
   assert.match(
     source,
@@ -262,6 +264,10 @@ test("只压缩 handle 旁标志，回复占位操作保留完整文字", () => 
     /allowButton\.className = "xps-account-allow";[\s\S]*?allowButton\.textContent = "放";/,
   );
   assert.match(source, /appealLink\.textContent = "向 MXGA 申诉"/);
+  assert.match(
+    source,
+    /blockButton\.className = "xps-block-account";[\s\S]*?blockButton\.textContent = "加入本地屏蔽";/,
+  );
   assert.match(
     source,
     /allowButton\.className = "xps-allow-account";[\s\S]*?allowButton\.textContent = "永久放行";/,

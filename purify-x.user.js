@@ -1551,14 +1551,28 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     scan(document);
   }
 
-  async function allowHandleLocally(rawHandle) {
+  async function setLocalHandleDisposition(
+    rawHandle,
+    disposition,
+    persist = saveLocalLists,
+  ) {
     const handle = normalizeHandle(rawHandle);
-    if (!HANDLE_RE.test(handle)) return false;
+    if (
+      !HANDLE_RE.test(handle) ||
+      (disposition !== "allow" && disposition !== "block")
+    ) {
+      return false;
+    }
     const wasBlocked = localBlockedHandles.has(handle);
     const wasAllowed = localAllowedHandles.has(handle);
-    localBlockedHandles.delete(handle);
-    localAllowedHandles.add(handle);
-    const saved = await saveLocalLists();
+    if (disposition === "allow") {
+      localBlockedHandles.delete(handle);
+      localAllowedHandles.add(handle);
+    } else {
+      localAllowedHandles.delete(handle);
+      localBlockedHandles.add(handle);
+    }
+    const saved = await persist();
     if (!saved) {
       if (wasBlocked) localBlockedHandles.add(handle);
       else localBlockedHandles.delete(handle);
@@ -1568,8 +1582,21 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     }
     invalidateDecisionCache();
     refreshAfterLocalListChange();
-    showToast(`已将 @${handle} 加入永远放行名单`, "success");
+    showToast(
+      disposition === "allow"
+        ? `已将 @${handle} 加入永远放行名单`
+        : `已将 @${handle} 加入本地屏蔽名单`,
+      "success",
+    );
     return true;
+  }
+
+  async function allowHandleLocally(rawHandle) {
+    return setLocalHandleDisposition(rawHandle, "allow");
+  }
+
+  async function blockHandleLocally(rawHandle) {
+    return setLocalHandleDisposition(rawHandle, "block");
   }
 
   function parseEditableHandleList(value) {
@@ -5581,6 +5608,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     // 避免它停在屏幕中央成为最容易误点的按钮。
     actions.append(restoreButton);
     if (HANDLE_RE.test(result.handle || "")) {
+      const normalizedResultHandle = normalizeHandle(result.handle);
       const allowButton = document.createElement("button");
       allowButton.type = "button";
       allowButton.className = "xps-allow-account";
@@ -5614,6 +5642,31 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
           }
         }
       });
+      if (!localBlockedHandles.has(normalizedResultHandle)) {
+        const blockButton = document.createElement("button");
+        blockButton.type = "button";
+        blockButton.className = "xps-block-account";
+        blockButton.textContent = "加入本地屏蔽";
+        blockButton.title =
+          `将 @${result.handle} 加入本地屏蔽名单；不会调用 X 拉黑接口`;
+        blockButton.setAttribute(
+          "aria-label",
+          `加入本地屏蔽账号 @${result.handle}`,
+        );
+        blockButton.addEventListener("click", async (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          blockButton.disabled = true;
+          blockButton.textContent = "正在保存…";
+          const saved = await blockHandleLocally(result.handle);
+          if (!saved) {
+            blockButton.disabled = false;
+            blockButton.textContent = "加入本地屏蔽";
+            showToast("无法保存该账号", "error");
+          }
+        });
+        actions.append(blockButton);
+      }
       // 本地放行只影响自己；命中公开名单时再给一个上游申诉入口，
       // 让误判能被 MXGA 维护者复核后从名单里摘掉。
       const appealUrl = mxgaAppealUrl(result.handle, result.userId);
@@ -6868,7 +6921,19 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         border-color: rgba(83, 100, 113, 0.45);
       }
 
-      .xps-allow-account:disabled {
+      .${CLASS.placeholder} .xps-block-account {
+        color: rgb(244, 33, 46);
+        border-color: rgba(244, 33, 46, 0.45);
+      }
+
+      .${CLASS.placeholder} .xps-block-account:hover {
+        color: rgb(220, 30, 41);
+        background: rgba(244, 33, 46, 0.1);
+        border-color: rgba(244, 33, 46, 0.7);
+      }
+
+      .xps-allow-account:disabled,
+      .xps-block-account:disabled {
         cursor: wait;
         opacity: 0.65;
       }
@@ -7740,6 +7805,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             sanitizeRemoteCache,
             sanitizePreferences,
             sanitizeEtag,
+            setLocalHandleDisposition,
             shouldForgetCachedHiddenForSurface,
             shouldProtectAuthor,
             shouldRepairCollapsedMultiImageLayout,
