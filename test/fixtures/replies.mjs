@@ -146,6 +146,14 @@ export const spam = [
     minScore: 9,
   },
   {
+    id: "xcb-shortlink-template",
+    note: "x-comment-blocker 词库中的固定引导句与 t.cn 短链组合",
+    text: "是这个吧，看了就知道了 https://t.cn/A6bC9_x",
+    name: "热心分享",
+    handle: "shareclip7788",
+    minScore: 8,
+  },
+  {
     id: "weak-sexual-name-with-contact",
     note: "色情昵称 + 站外联系方式",
     text: "加vx 看资源",
@@ -199,6 +207,14 @@ export const ham = [
     handle: "creator",
     options: { hasExternalLink: true },
     maxScore: 5,
+  },
+  {
+    id: "xcb-template-copy-without-shortlink",
+    note: "固定引导句没有 t.cn 短链时不单独定罪",
+    text: "是这个吧，看了就知道了",
+    name: "普通回复者",
+    handle: "normal_reply",
+    maxScore: 0,
   },
   // 该真实主贴的正文规则只有 2 分；详情页作用域必须始终放行主贴。
   // 这里只固定内容侧基线，避免后续误把三个普通 emoji 扩成强关键词。
