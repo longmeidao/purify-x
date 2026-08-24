@@ -296,6 +296,21 @@ test("塌缩多图兼容层已接入扫描、重挂载和窄范围样式", () =>
   assert.match(source, /mediaStatus: "data-xps-media-status"/);
 });
 
+test("MutationObserver 批量补扫受影响 tweet 而非每次全页扫描", () => {
+  const source = fs.readFileSync(SCRIPT_PATH, "utf8");
+  assert.match(source, /const pendingScanRoots = new Set\(\);/);
+  assert.match(source, /function mutationScanPlan\(records\)/);
+  assert.match(
+    source,
+    /scanPlan\.global\) scheduleScan\(document\);[\s\S]*?scheduleScan\(scanPlan\.roots\);/,
+  );
+  assert.match(source, /scan\(scanTarget\);/);
+  assert.doesNotMatch(
+    source,
+    /function scheduleScan\([^)]*\)\s*\{[\s\S]{0,300}?setTimeout\(\(\) => scan\(document\)/,
+  );
+});
+
 test("远程 JSON 同时限制字符数和 UTF-8 字节数", () => {
   const source = fs.readFileSync(SCRIPT_PATH, "utf8");
   assert.match(source, /new TextEncoder\(\)\.encode\(text\)\.byteLength/);

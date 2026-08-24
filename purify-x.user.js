@@ -383,6 +383,8 @@
   };
   let remoteSyncPromise = null;
   let pendingTimer = 0;
+  const pendingScanRoots = new Set();
+  let pendingGlobalScan = false;
   let followingRetryTimer = 0;
   let observer;
   let timelineReturnSnapshot = null;
@@ -6482,13 +6484,17 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     // 只在同一轮扫描内复用 React roots；X 回收 DOM 后下一轮必须重新读取。
     scanReactRootsCache = new WeakMap();
     annotateProfileAccount();
-    const articles = [];
-    if (root instanceof Element && root.matches(SELECTOR.tweet)) {
-      articles.push(root);
+    const articleSet = new Set();
+    const roots = Array.isArray(root) ? root : [root];
+    for (const scanRoot of roots) {
+      if (scanRoot instanceof Element && scanRoot.matches(SELECTOR.tweet)) {
+        articleSet.add(scanRoot);
+      }
+      for (const article of scanRoot?.querySelectorAll?.(SELECTOR.tweet) || []) {
+        articleSet.add(article);
+      }
     }
-    for (const article of root.querySelectorAll?.(SELECTOR.tweet) || []) {
-      if (article !== root) articles.push(article);
-    }
+    const articles = [...articleSet];
     repairCollapsedMultiImageLayouts(articles);
 
     const threadId = statusIdFromLocation();
@@ -6538,16 +6544,33 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       const signals = computeReplyBehaviorSignals([
         ...threadBehaviorRecordCache.values(),
       ]);
+      const newlySignaledStatusIds = new Set();
       // X 会在滚动时回收回复 DOM。已经观察到的行为信号在当前详情页内
       // 保持为真，避免某条回复因暂时离开 DOM 而在隐藏/显示之间反复切换。
       for (const id of signals.coordinated) {
+        if (!coordinatedBurstStatusIds.has(id)) newlySignaledStatusIds.add(id);
         coordinatedBurstStatusIds.add(id);
       }
       for (const id of signals.repeated) {
+        if (!repeatedLowInfoStatusIds.has(id)) newlySignaledStatusIds.add(id);
         repeatedLowInfoStatusIds.add(id);
       }
       for (const id of signals.duplicated) {
+        if (!duplicateTemplateStatusIds.has(id)) newlySignaledStatusIds.add(id);
         duplicateTemplateStatusIds.add(id);
+      }
+      // 新回复可能让此前可见的旧回复首次获得跨账号/集群证据；只补扫这些
+      // 受影响的已挂载文章，不因此退回整页 query + 全量评分。
+      if (newlySignaledStatusIds.size > 0) {
+        for (const article of document.querySelectorAll(SELECTOR.tweet)) {
+          if (
+            newlySignaledStatusIds.has(articleStatusId(article)) &&
+            !articleSet.has(article)
+          ) {
+            articles.push(article);
+            articleSet.add(article);
+          }
+        }
       }
     } else {
       threadBehaviorContextId = "";
@@ -6562,9 +6585,29 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     updateCounter();
   }
 
-  function scheduleScan() {
+  function scheduleScan(target = document) {
+    const targets =
+      target instanceof Set || Array.isArray(target) ? target : [target];
+    for (const scanRoot of targets) {
+      if (scanRoot === document) {
+        pendingGlobalScan = true;
+        pendingScanRoots.clear();
+        break;
+      }
+      if (!pendingGlobalScan && scanRoot instanceof Element) {
+        pendingScanRoots.add(scanRoot);
+      }
+    }
     window.clearTimeout(pendingTimer);
-    pendingTimer = window.setTimeout(() => scan(document), CONFIG.debounceMs);
+    pendingTimer = window.setTimeout(() => {
+      const scanTarget =
+        pendingGlobalScan || pendingScanRoots.size === 0
+          ? document
+          : [...pendingScanRoots];
+      pendingGlobalScan = false;
+      pendingScanRoots.clear();
+      scan(scanTarget);
+    }, CONFIG.debounceMs);
   }
 
   function isOwnUiNode(node) {
@@ -6580,28 +6623,67 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     );
   }
 
-  function mutationsNeedScan(records) {
-    const relevantSelector = [
+  function mutationScanPlan(records) {
+    const tweetRelevantSelector = [
       SELECTOR.tweet,
       SELECTOR.cell,
       SELECTOR.tweetText,
       SELECTOR.userName,
       'a[href*="/status/"][href*="/photo/"]',
       "time",
+      '[data-testid$="-follow"]',
+      '[data-testid$="-unfollow"]',
+    ].join(",");
+    const globalSelector = [
+      SELECTOR.profileUserName,
       '[role="tablist"]',
       '[role="tab"]',
       '[role="menu"]',
       '[role="menuitem"]',
       '[role="option"]',
-      '[data-testid$="-follow"]',
-      '[data-testid$="-unfollow"]',
     ].join(",");
-    const relevantNode = (node) => {
+    const roots = new Set();
+    let global = false;
+    let groupingChanged = false;
+
+    const elementFrom = (node) => {
+      return node instanceof Element ? node : node?.parentElement || null;
+    };
+    const addTopLevelArticle = (article) => {
+      if (!(article instanceof Element)) return;
+      let topLevel = article;
+      let parent = topLevel.parentElement?.closest(SELECTOR.tweet);
+      while (parent) {
+        topLevel = parent;
+        parent = topLevel.parentElement?.closest(SELECTOR.tweet);
+      }
+      roots.add(topLevel);
+    };
+    const addRelevantNode = (node) => {
+      const element = elementFrom(node);
+      if (!element) return;
+      if (
+        element.matches(globalSelector) ||
+        element.querySelector?.(globalSelector)
+      ) {
+        global = true;
+      }
+      if (
+        element.matches(tweetRelevantSelector) ||
+        element.querySelector?.(tweetRelevantSelector)
+      ) {
+        addTopLevelArticle(element.closest(SELECTOR.tweet));
+        for (const article of element.querySelectorAll?.(SELECTOR.tweet) || []) {
+          addTopLevelArticle(article);
+        }
+      }
+    };
+    const containsTweetOrCell = (node) => {
       const element =
         node instanceof Element ? node : node?.parentElement || null;
       return Boolean(
-        element?.matches?.(relevantSelector) ||
-          element?.querySelector?.(relevantSelector),
+        element?.matches?.(`${SELECTOR.tweet}, ${SELECTOR.cell}`) ||
+          element?.querySelector?.(`${SELECTOR.tweet}, ${SELECTOR.cell}`),
       );
     };
 
@@ -6609,21 +6691,26 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       if (isOwnUiNode(record.target)) continue;
       const changed = [...record.addedNodes, ...record.removedNodes];
       if (changed.length > 0 && changed.every(isOwnUiNode)) continue;
-      if (changed.some(relevantNode)) return true;
+      for (const node of record.addedNodes) addRelevantNode(node);
+      if ([...record.removedNodes].some(containsTweetOrCell)) {
+        groupingChanged = true;
+      }
 
-      const target =
-        record.target instanceof Element
-          ? record.target
-          : record.target?.parentElement || null;
+      const target = elementFrom(record.target);
       if (
         target?.closest?.(
           `${SELECTOR.tweetText}, ${SELECTOR.userName}`,
         )
       ) {
-        return true;
+        addTopLevelArticle(target.closest(SELECTOR.tweet));
+      } else if (
+        target?.matches?.(globalSelector) ||
+        target?.closest?.(globalSelector)
+      ) {
+        global = true;
       }
     }
-    return false;
+    return { global, groupingChanged, roots };
   }
 
   function releaseRecycledCells(records) {
@@ -7864,13 +7951,15 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     scan(document);
     observer = new MutationObserver((records) => {
       const presentationChanged = releaseRecycledCells(records);
-      if (presentationChanged) {
+      const scanPlan = mutationScanPlan(records);
+      if (presentationChanged || scanPlan.groupingChanged) {
         // 与缓存恢复放在同一轮微任务中完成，浏览器下一帧只会看到
         // 最终的隐藏/合并状态，不再先绘制单条占位再重新折叠。
         refreshGroups();
         updateCounter();
       }
-      if (mutationsNeedScan(records)) scheduleScan();
+      if (scanPlan.global) scheduleScan(document);
+      else if (scanPlan.roots.size > 0) scheduleScan(scanPlan.roots);
     });
     observer.observe(document.body, { childList: true, subtree: true });
 
