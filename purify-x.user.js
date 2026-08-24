@@ -964,7 +964,6 @@
           keywords: [...localStrongKeywords].sort(),
         },
         subscriptions: {
-          checkedAt: customSubscriptionCache.lastCheckedAt || 0,
           block: [...subscribedBlockedHandles].sort(),
           allow: [...subscribedAllowedHandles].sort(),
           keywords: [...subscribedStrongKeywords].sort(),
@@ -2146,23 +2145,60 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     }, CONFIG.remoteUpdateMs);
   }
 
-  function requestText(url, maxChars, accept = "application/json, text/plain") {
+  function sanitizeEtag(value) {
+    const etag = typeof value === "string" ? value.trim() : "";
+    return etag && etag.length <= 512 && !/[\r\n]/.test(etag) ? etag : "";
+  }
+
+  function responseHeaderValue(rawHeaders, targetName) {
+    const expected = String(targetName || "").toLowerCase();
+    for (const line of String(rawHeaders || "").split(/\r?\n/)) {
+      const separator = line.indexOf(":");
+      if (separator <= 0) continue;
+      if (line.slice(0, separator).trim().toLowerCase() === expected) {
+        return line.slice(separator + 1).trim();
+      }
+    }
+    return "";
+  }
+
+  function requestTextResource(
+    url,
+    maxChars,
+    accept = "application/json, text/plain",
+    { etag = "" } = {},
+  ) {
     return new Promise((resolve, reject) => {
       if (typeof GM_xmlhttpRequest !== "function") {
         reject(new Error("当前 userscript 管理器不支持跨域名单同步"));
         return;
       }
 
+      const safeEtag = sanitizeEtag(etag);
+      const headers = {
+        Accept: accept,
+        "Cache-Control": "no-cache",
+      };
+      if (safeEtag) headers["If-None-Match"] = safeEtag;
+
       GM_xmlhttpRequest({
         method: "GET",
         url,
         anonymous: true,
         timeout: 30_000,
-        headers: {
-          Accept: accept,
-          "Cache-Control": "no-cache",
-        },
+        headers,
         onload(response) {
+          const responseEtag = sanitizeEtag(
+            responseHeaderValue(response.responseHeaders, "etag"),
+          );
+          if (response.status === 304) {
+            resolve({
+              notModified: true,
+              text: "",
+              etag: responseEtag || safeEtag,
+            });
+            return;
+          }
           if (response.status < 200 || response.status >= 300) {
             reject(new Error(`HTTP ${response.status}`));
             return;
@@ -2173,7 +2209,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             reject(new Error("响应超过安全大小限制"));
             return;
           }
-          resolve(text);
+          resolve({ notModified: false, text, etag: responseEtag });
         },
         onerror() {
           reject(new Error("网络请求失败"));
@@ -2185,13 +2221,31 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     });
   }
 
-  async function requestJson(url, maxChars) {
-    const text = await requestText(url, maxChars, "application/json");
+  async function requestText(
+    url,
+    maxChars,
+    accept = "application/json, text/plain",
+  ) {
+    return (await requestTextResource(url, maxChars, accept)).text;
+  }
+
+  async function requestJsonResource(url, maxChars, options = {}) {
+    const response = await requestTextResource(
+      url,
+      maxChars,
+      "application/json",
+      options,
+    );
+    if (response.notModified) return { ...response, value: null };
     try {
-      return JSON.parse(text);
+      return { ...response, value: JSON.parse(response.text) };
     } catch {
       throw new Error("响应不是有效 JSON");
     }
+  }
+
+  async function requestJson(url, maxChars) {
+    return (await requestJsonResource(url, maxChars)).value;
   }
 
   function validateCustomSubscription(raw, requireSchema = false) {
@@ -2233,6 +2287,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         format: String(source.format || "缓存 JSON").slice(0, 80),
         updatedAt: Number(source.updatedAt) || 0,
         checkedAt: Number(source.checkedAt) || 0,
+        etag: sanitizeEtag(source.etag),
         lastError: String(source.lastError || ""),
       };
     }
@@ -2273,8 +2328,25 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const nextSources = {};
     const results = await Promise.allSettled(
       customSubscriptionUrls.map(async (url) => {
+        const previous = customSubscriptionCache.sources[url];
+        const response = await requestJsonResource(
+          url,
+          LOCAL_LISTS.maxSubscriptionChars,
+          { etag: previous?.etag },
+        );
+        if (response.notModified) {
+          if (!previous) throw new Error("服务器返回 304，但本地没有有效缓存");
+          return {
+            url,
+            ...previous,
+            checkedAt: Date.now(),
+            etag: response.etag || previous.etag,
+            lastError: "",
+            changed: false,
+          };
+        }
         const data = validateCustomSubscription(
-          await requestJson(url, LOCAL_LISTS.maxSubscriptionChars),
+          response.value,
           true,
         );
         return {
@@ -2282,14 +2354,19 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
           ...data,
           checkedAt: Date.now(),
           updatedAt: Date.now(),
+          etag: response.etag,
           lastError: "",
+          changed: true,
         };
       }),
     );
+    let contentChanged = false;
     results.forEach((result, index) => {
       const url = customSubscriptionUrls[index];
       if (result.status === "fulfilled") {
-        nextSources[url] = result.value;
+        const { changed, ...source } = result.value;
+        nextSources[url] = source;
+        contentChanged ||= changed;
         successCount += 1;
         return;
       }
@@ -2314,7 +2391,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       customSubscriptionCache,
     );
     applyCustomSubscriptionCache(customSubscriptionCache);
-    refreshAfterLocalListChange();
+    if (contentChanged) refreshAfterLocalListChange();
     return {
       skipped: false,
       successCount,
@@ -2697,6 +2774,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       safe.sources.twitterBlockPorn = {
         updatedAt: Number(tbp.updatedAt) || 0,
         checkedAt: Number(tbp.checkedAt) || 0,
+        etag: sanitizeEtag(tbp.etag),
         handles: sanitizeStringArray(tbp.handles),
         lastError: String(tbp.lastError || ""),
       };
@@ -2707,6 +2785,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         version: String(tweetGuard.version || ""),
         updatedAt: Number(tweetGuard.updatedAt) || 0,
         checkedAt: Number(tweetGuard.checkedAt) || 0,
+        etag: sanitizeEtag(tweetGuard.etag),
         keywords: sanitizeKeywordArray(tweetGuard.keywords),
         lastError: String(tweetGuard.lastError || ""),
       };
@@ -2978,34 +3057,60 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     };
   }
 
-  async function syncTwitterBlockPorn() {
-    const handles = validateTwitterBlockPorn(
-      await requestJson(
-        REMOTE.twitterBlockPorn,
-        REMOTE.maxTwitterBlockPornChars,
-      ),
+  async function syncTwitterBlockPorn(previous = {}) {
+    const previousHandles = sanitizeStringArray(previous.handles);
+    const response = await requestJsonResource(
+      REMOTE.twitterBlockPorn,
+      REMOTE.maxTwitterBlockPornChars,
+      { etag: previousHandles.length >= 100 ? previous.etag : "" },
     );
     const now = Date.now();
+    if (response.notModified) {
+      return {
+        ...previous,
+        checkedAt: now,
+        etag: response.etag || sanitizeEtag(previous.etag),
+        handles: previousHandles,
+        lastError: "",
+      };
+    }
+    const handles = validateTwitterBlockPorn(
+      response.value,
+    );
     return {
       updatedAt: now,
       checkedAt: now,
+      etag: response.etag,
       handles,
       lastError: "",
     };
   }
 
-  async function syncTweetGuardRules() {
-    const parsed = validateTweetGuardRules(
-      await requestJson(
-        REMOTE.tweetGuardCommunityRules,
-        REMOTE.maxTweetGuardChars,
-      ),
+  async function syncTweetGuardRules(previous = {}) {
+    const previousKeywords = sanitizeKeywordArray(previous.keywords);
+    const response = await requestJsonResource(
+      REMOTE.tweetGuardCommunityRules,
+      REMOTE.maxTweetGuardChars,
+      { etag: previousKeywords.length >= 10 ? previous.etag : "" },
     );
     const now = Date.now();
+    if (response.notModified) {
+      return {
+        ...previous,
+        checkedAt: now,
+        etag: response.etag || sanitizeEtag(previous.etag),
+        keywords: previousKeywords,
+        lastError: "",
+      };
+    }
+    const parsed = validateTweetGuardRules(
+      response.value,
+    );
     return {
       version: parsed.version,
       updatedAt: now,
       checkedAt: now,
+      etag: response.etag,
       keywords: parsed.keywords,
       lastError: "",
     };
@@ -3042,10 +3147,10 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
           ? syncMxga(previousMxga, force)
           : Promise.resolve(null),
         enabledBuiltInSources.has(BUILTIN_SOURCE.twitterBlockPorn)
-          ? syncTwitterBlockPorn()
+          ? syncTwitterBlockPorn(previousTbp)
           : Promise.resolve(null),
         enabledBuiltInSources.has(BUILTIN_SOURCE.tweetGuard)
-          ? syncTweetGuardRules()
+          ? syncTweetGuardRules(previousTweetGuard)
           : Promise.resolve(null),
       ]);
 
@@ -7634,12 +7739,17 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             sanitizeAiState,
             sanitizeRemoteCache,
             sanitizePreferences,
+            sanitizeEtag,
             shouldForgetCachedHiddenForSurface,
             shouldProtectAuthor,
             shouldRepairCollapsedMultiImageLayout,
             timelineReturnScrollDelta,
             timelineResultEnabled,
             timelineReturnSnapshotIsCurrent,
+            requestTextResource,
+            responseHeaderValue,
+            syncTweetGuardRules,
+            syncTwitterBlockPorn,
             updateAiLearnedRuleFeedback,
             userIdFromReactUser,
             validateMxgaLite,
