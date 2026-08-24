@@ -22,6 +22,26 @@ test("userscript 头部、脚本内 VERSION 和 package.json 版本一致", () =
     fs.readFileSync(new URL("../package.json", import.meta.url), "utf8"),
   );
   assert.equal(pkg.version, constant[1]);
+
+  const versionedDocs = [
+    ["AGENTS.md", new URL("../AGENTS.md", import.meta.url)],
+    ["CLAUDE.md", new URL("../CLAUDE.md", import.meta.url)],
+    [
+      "安装说明",
+      new URL("../docs/Purify-X-安装说明.md", import.meta.url),
+    ],
+  ];
+  for (const [label, url] of versionedDocs) {
+    const documentHeader = fs
+      .readFileSync(url, "utf8")
+      .split("\n")
+      .slice(0, 20)
+      .join("\n");
+    assert.ok(
+      documentHeader.includes(constant[1]),
+      `${label} 开头没有同步当前版本 ${constant[1]}`,
+    );
+  }
 });
 
 test("userscript 自动更新地址固定指向公开 GitHub 主分支", () => {
@@ -104,7 +124,7 @@ test("可疑账号与推广内容使用两个独立时间线选项", () => {
   assert.doesNotMatch(source, /threadMainMode/);
   assert.match(
     source,
-    /currentStatusId === statusIdFromLocation\(\)[\s\S]*?forgetHiddenStatus\(currentStatusId\);[\s\S]*?return false;/,
+    /shouldForgetCachedHiddenForSurface\(\{[\s\S]*?mainAuthorHandle:\s*authorHandleFromStatusPath\(\),[\s\S]*?currentAuthorHandle,[\s\S]*?\}\)[\s\S]*?forgetHiddenStatus\(currentStatusId\);[\s\S]*?return false;/,
   );
 });
 

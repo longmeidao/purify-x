@@ -10,6 +10,14 @@
 
 export const spam = [
   {
+    id: "invisible-variation-selector-name",
+    note: "变体选择器插入“固炮”不能绕过昵称强规则",
+    text: "🌸",
+    name: "绿药🍑固\uFE00炮",
+    handle: "greenherb11223",
+    minScore: 8,
+  },
+  {
     id: "restricted-telegram-passcode",
     note: "2026-08-22 实测：@ac520_like 限制回复，以直达 t.me 链接和暗号引流",
     text: "为了拍出有灵魂的照片，我今天跟路边的环卫大爷互换了三天灵魂🚀 直达链接：http://t.me/ac520_like1 暗号：阿次",

@@ -65,7 +65,48 @@ test("详情页 URL 解析出主贴作者 handle，非法路径返回空", () =>
   );
   assert.equal(api.authorHandleFromStatusPath("/home"), "");
   assert.equal(api.authorHandleFromStatusPath("/status/123"), "");
+  assert.equal(api.authorHandleFromStatusPath("/i/status/123"), "");
+  assert.equal(api.authorHandleFromStatusPath("/foo/bar/status/123"), "");
   assert.equal(api.authorHandleFromStatusPath(""), "");
+});
+
+test("缓存重挂载沿用详情页主贴及作者续写放行边界", () => {
+  assert.equal(
+    api.shouldForgetCachedHiddenForSurface({
+      mainStatusId: "100",
+      currentStatusId: "100",
+      mainAuthorHandle: "thread_author",
+      currentAuthorHandle: "thread_author",
+    }),
+    true,
+  );
+  assert.equal(
+    api.shouldForgetCachedHiddenForSurface({
+      mainStatusId: "100",
+      currentStatusId: "101",
+      mainAuthorHandle: "thread_author",
+      currentAuthorHandle: "thread_author",
+    }),
+    true,
+  );
+  assert.equal(
+    api.shouldForgetCachedHiddenForSurface({
+      mainStatusId: "100",
+      currentStatusId: "102",
+      mainAuthorHandle: "thread_author",
+      currentAuthorHandle: "other_author",
+    }),
+    false,
+  );
+  assert.equal(
+    api.shouldForgetCachedHiddenForSurface({
+      mainStatusId: "",
+      currentStatusId: "102",
+      mainAuthorHandle: "",
+      currentAuthorHandle: "other_author",
+    }),
+    false,
+  );
 });
 
 test("扫描入口不会跳过账号主页帖子列表", () => {

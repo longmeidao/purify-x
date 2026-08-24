@@ -167,6 +167,14 @@ test("自定义关键词支持 token、提及、hashtag、域名和重音归一"
   assert.equal(api.keywordMatches("Cafe promotion", "café"), true);
 });
 
+test("评分归一化移除完整 Unicode 默认可忽略字符类", () => {
+  for (const invisible of ["\uFE00", "\u00AD", "\u2061"]) {
+    const result = scoreReply("普通内容", `固${invisible}炮`, "spam_handle");
+    assert.equal(result.name, "固炮");
+    assert.ok(result.score >= threshold);
+  }
+});
+
 test("行为记录缓存跨虚拟列表回收合并并按 LRU 限长", () => {
   const cache = new Map();
   api.mergeBehaviorRecordCache(cache, [

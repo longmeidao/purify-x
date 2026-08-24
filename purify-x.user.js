@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.7.6
+// @version      2.7.7
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -24,7 +24,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.7.6";
+  const VERSION = "2.7.7";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -333,7 +333,9 @@
   const MID_SENTENCE_EMOJI_RE =
     /\p{Script=Han}[\p{Extended_Pictographic}\uFE0E\uFE0F\u200D]+\p{Script=Han}/u;
 
-  const ZERO_WIDTH_RE = /[\u200B-\u200F\u202A-\u202E\u2060\u2066-\u2069\uFEFF]/g;
+  // 统一移除 Unicode 默认可忽略字符，避免变体选择器、软连字符、
+  // 不可见运算符和 bidi 控制符被插入关键词或模板中规避判定。
+  const DEFAULT_IGNORABLE_RE = /\p{Default_Ignorable_Code_Point}/gu;
   const EMOJI_RE = /\p{Extended_Pictographic}/gu;
   const CJK_RE = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/gu;
   const LATIN_RE = /[a-z]/gi;
@@ -421,7 +423,7 @@
   function normalize(value) {
     return String(value || "")
       .normalize("NFKC")
-      .replace(ZERO_WIDTH_RE, "")
+      .replace(DEFAULT_IGNORABLE_RE, "")
       .replace(/[𝕏Ｘ]/g, "x")
       .replace(/[瑟澀]/g, "涩")
       .replace(/[艹操]/g, "骚")
@@ -3976,14 +3978,13 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
   // 详情页 URL 自带主贴作者 handle（/handle/status/id），比 DOM 抽取更可靠；
   // 即使正文卡片的 statusId 提取异常，也能用它兜底识别主贴作者的身份。
   function authorHandleFromStatusPath(pathname = location.pathname) {
-    const parts = String(pathname || "")
-      .split("/")
-      .filter(Boolean)
-      .map((part) => part.toLowerCase());
-    const statusIndex = parts.indexOf("status");
-    if (statusIndex < 1) return "";
-    const candidate = parts[statusIndex - 1];
-    return HANDLE_RE.test(candidate) ? candidate : "";
+    const match = String(pathname || "").match(
+      /^\/([a-z0-9_]{1,15})\/status\/\d+(?:\/|$)/i,
+    );
+    const candidate = normalizeHandle(match?.[1]);
+    return candidate && !RESERVED_PROFILE_PATHS.has(candidate)
+      ? candidate
+      : "";
   }
 
   function detailNavigationStatusId(sourceHref, targetHref) {
@@ -4121,6 +4122,23 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return timelineEligible && (filterTimeline || filterTimelinePromotions)
       ? "timeline"
       : "none";
+  }
+
+  function shouldForgetCachedHiddenForSurface({
+    mainStatusId = "",
+    currentStatusId = "",
+    mainAuthorHandle = "",
+    currentAuthorHandle = "",
+  } = {}) {
+    return Boolean(
+      mainStatusId &&
+        articleFilterScope({
+          mainStatusId,
+          currentStatusId,
+          mainAuthorHandle,
+          currentAuthorHandle,
+        }) === "none",
+    );
   }
 
   function contentPolicyForSurface({
@@ -5467,16 +5485,22 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
   function rehydrateCachedHiddenArticle(article, statusId = "") {
     if (!(article instanceof HTMLElement)) return false;
     const currentStatusId = statusId || articleStatusId(article);
+    const cached = cachedHiddenStatus(currentStatusId);
+    const currentAuthorHandle =
+      articleHandle(article) || normalizeHandle(cached?.result?.handle);
     if (
-      currentStatusId &&
-      currentStatusId === statusIdFromLocation()
+      shouldForgetCachedHiddenForSurface({
+        mainStatusId: statusIdFromLocation(),
+        currentStatusId,
+        mainAuthorHandle: authorHandleFromStatusPath(),
+        currentAuthorHandle,
+      })
     ) {
-      // 详情页主贴是用户主动打开的目标，即使旧版本曾缓存过隐藏结果，
-      // 重挂载时也必须丢弃，不能在完整扫描前再次预隐藏。
+      // 详情页主贴及主贴作者的续写是用户主动阅读的内容。即使身份信息
+      // 晚到前曾缓存过隐藏结果，重挂载时也必须丢弃，不能先误隐藏一帧。
       forgetHiddenStatus(currentStatusId);
       return false;
     }
-    const cached = cachedHiddenStatus(currentStatusId);
     if (!cached || restoredFingerprints.has(cached.fingerprint)) {
       if (cached && restoredFingerprints.has(cached.fingerprint)) {
         forgetHiddenStatus(currentStatusId);
@@ -7502,6 +7526,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             sanitizeAiState,
             sanitizeRemoteCache,
             sanitizePreferences,
+            shouldForgetCachedHiddenForSurface,
             shouldProtectAuthor,
             shouldRepairCollapsedMultiImageLayout,
             timelineReturnScrollDelta,
