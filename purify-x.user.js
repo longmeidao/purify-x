@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.7.8
+// @version      2.7.9
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -24,7 +24,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.7.8";
+  const VERSION = "2.7.9";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -114,6 +114,7 @@
     filterTimeline: false,
     filterTimelinePromotions: true,
     showAppealButton: true,
+    hideSidebarPromos: true,
   });
   const AI = Object.freeze({
     configKey: "xps-ai-config-v1",
@@ -248,6 +249,7 @@
     groupOpen: "xps-group-open",
     accountBadge: "xps-account-badge",
     mediaWidthFix: "xps-media-width-fix",
+    sidebarPromoHidden: "xps-hide-sidebar-promos",
   });
 
   const ATTRIBUTE = Object.freeze({
@@ -675,6 +677,7 @@
       filterTimelinePromotions: raw?.filterTimelinePromotions !== false,
       // 旧设置没有该字段时保持升级前的可见行为；只有严格 false 才隐藏。
       showAppealButton: raw?.showAppealButton !== false,
+      hideSidebarPromos: raw?.hideSidebarPromos !== false,
     };
   }
 
@@ -1647,6 +1650,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       `时间线可疑账号 ${preferences.filterTimeline ? "已屏蔽" : "未屏蔽"}`,
       `时间线推广内容 ${preferences.filterTimelinePromotions ? "已屏蔽" : "未屏蔽"}`,
       `MXGA 申诉按钮 ${preferences.showAppealButton ? "已显示" : "已隐藏"}`,
+      `右栏 Premium 与热门话题 ${preferences.hideSidebarPromos ? "已隐藏" : "未隐藏"}`,
       `自定义屏蔽词 ${localStrongKeywords.size}`,
       `订阅 ${customSubscriptionUrls.length} · 已载入账号 ${subscribedBlockedHandles.size} · 词 ${subscribedStrongKeywords.size}`,
       `AI ${aiConfig.enabled ? "已启用" : "未启用"} · 今日调用 ${aiState.usage.count}/${aiConfig.dailyLimit} · 学习规则 ${aiState.learnedRules.length} · 判定缓存 ${Object.keys(aiState.decisions).length}`,
@@ -1834,6 +1838,8 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       )?.checked,
       showAppealButton: panel.querySelector("#xps-show-appeal-button")
         ?.checked,
+      hideSidebarPromos: panel.querySelector("#xps-hide-sidebar-promos")
+        ?.checked,
     });
     if (
       nextAiConfig.enabled &&
@@ -1858,6 +1864,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       return;
     }
     preferences = preferenceResult.value;
+    applySidebarPromoVisibility();
     hiddenStatusCache.clear();
     applyLocalLists({
       schema: LOCAL_LISTS.schema,
@@ -1964,6 +1971,14 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
                 <span class="xps-source-copy">
                   <span class="xps-source-title">显示 MXGA 申诉按钮</span>
                   <small>默认开启。关闭后只隐藏申诉入口，不影响名单判定、恢复或永久放行。</small>
+                </span>
+              </label>
+              <label class="xps-source-card">
+                <input id="xps-hide-sidebar-promos" type="checkbox">
+                <span class="xps-source-check" aria-hidden="true">✓</span>
+                <span class="xps-source-copy">
+                  <span class="xps-source-title">隐藏右栏 Premium 与热门话题</span>
+                  <small>默认开启。只隐藏侧栏的 Premium 订阅入口和“What’s happening”模块，探索页与其他模块不受影响。</small>
                 </span>
               </label>
             </div>
@@ -2085,6 +2100,8 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       preferences.filterTimelinePromotions;
     panel.querySelector("#xps-show-appeal-button").checked =
       preferences.showAppealButton;
+    panel.querySelector("#xps-hide-sidebar-promos").checked =
+      preferences.hideSidebarPromos;
     panel.querySelector("#xps-settings-allow").value =
       [...localAllowedHandles].sort().join("\n");
     panel.querySelector("#xps-settings-block").value =
@@ -6795,12 +6812,35 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return presentationChanged;
   }
 
+  function applySidebarPromoVisibility() {
+    if (typeof document === "undefined") return;
+    document.documentElement?.classList.toggle(
+      CLASS.sidebarPromoHidden,
+      preferences.hideSidebarPromos,
+    );
+  }
+
   function installStyles() {
     document.getElementById("xps-styles")?.remove();
     const style = document.createElement("style");
     style.id = "xps-styles";
     style.textContent = `
       .${CLASS.hidden} > *:not(.${CLASS.placeholder}) {
+        display: none !important;
+      }
+
+      /*
+       * 右栏的 Premium 订阅入口和“What's happening”热门话题。
+       * 两者的 aria-label 会随界面语言变化，所以只用不翻译的锚点定位：
+       * Premium 认 /i/premium_sign_up 链接，热门话题认 data-testid="trend"。
+       * 选择器命中的是模块最外层包装节点，display:none 会连同它的下外边距
+       * 一起消失，不会在侧栏留下空档；作用域限定在 sidebarColumn 内，
+       * 探索页主栏的趋势列表不受影响。
+       */
+      html.${CLASS.sidebarPromoHidden}
+        [data-testid="sidebarColumn"] div:has(> div > aside a[href^="/i/premium_sign_up"]),
+      html.${CLASS.sidebarPromoHidden}
+        [data-testid="sidebarColumn"] div:has(> section [data-testid="trend"]) {
         display: none !important;
       }
 
@@ -7957,6 +7997,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       decisionCacheRevision = computeDecisionCacheRevision();
       decisionCacheReady = true;
     }
+    applySidebarPromoVisibility();
 
     scan(document);
     observer = new MutationObserver((records) => {

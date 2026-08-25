@@ -4,7 +4,7 @@
 
 - 以 `CLAUDE.md`、`TODO.md`、`docs/Purify-X-安装说明.md` 和 `history/`
   中的会话记录恢复上下文。
-- 首个 Git 基线为 v1.14.0，当前版本为 **Purify X v2.7.8**。不要从旧临时目录
+- 首个 Git 基线为 v1.14.0，当前版本为 **Purify X v2.7.9**。不要从旧临时目录
   或旧 userscript 副本覆盖当前文件。
 - 除非用户明确要求，不要使用 Computer Use。代码、Git 和自动化检查优先通过本地
   文件与命令完成。
