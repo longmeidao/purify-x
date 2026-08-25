@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.7.7
+// @version      2.7.8
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -24,7 +24,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.7.7";
+  const VERSION = "2.7.8";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -5535,10 +5535,15 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     let placeholder = cell.querySelector(`:scope > .${CLASS.placeholder}`);
     const evidenceSignature = JSON.stringify(result.evidence || []);
     const appealVisibility = preferences.showAppealButton ? "shown" : "hidden";
+    // 推广内容是"这条帖子在打广告"的判定，不是"这个账号一直是垃圾"。
+    // 同一个账号平时发正常内容、偶尔接一条推广，屏蔽账号会误伤后续内容，
+    // 所以这类占位只保留恢复与永久放行。
+    const promotionOnly = result.promotionOnly ? "1" : "0";
     if (
       placeholder?.dataset.xpsVersion === VERSION &&
       placeholder.dataset.xpsEvidence === evidenceSignature &&
-      placeholder.dataset.xpsAppealVisibility === appealVisibility
+      placeholder.dataset.xpsAppealVisibility === appealVisibility &&
+      placeholder.dataset.xpsPromotionOnly === promotionOnly
     ) {
       return placeholder;
     }
@@ -5552,6 +5557,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     placeholder.dataset.xpsVersion = VERSION;
     placeholder.dataset.xpsEvidence = evidenceSignature;
     placeholder.dataset.xpsAppealVisibility = appealVisibility;
+    placeholder.dataset.xpsPromotionOnly = promotionOnly;
     placeholder.title = result.reasons.join("\n");
 
     const copy = document.createElement("span");
@@ -5644,7 +5650,10 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
           }
         }
       });
-      if (!localBlockedHandles.has(normalizedResultHandle)) {
+      if (
+        !result.promotionOnly &&
+        !localBlockedHandles.has(normalizedResultHandle)
+      ) {
         const blockButton = document.createElement("button");
         blockButton.type = "button";
         blockButton.className = "xps-block-account";
@@ -6043,6 +6052,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         timelinePromotionCandidate: Boolean(
           promotionTimelineEligible && promotion.highConfidence,
         ),
+        promotionOnly: contentPolicy === "promotion-candidate",
         itemLabel: contentPolicy === "promotion-candidate"
           ? "推广内容"
           : "低质量账号内容",
