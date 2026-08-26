@@ -24,12 +24,8 @@ test("userscript 头部、脚本内 VERSION 和 package.json 版本一致", () =
   assert.equal(pkg.version, constant[1]);
 
   const versionedDocs = [
-    ["AGENTS.md", new URL("../AGENTS.md", import.meta.url)],
-    ["CLAUDE.md", new URL("../CLAUDE.md", import.meta.url)],
-    [
-      "安装说明",
-      new URL("../docs/Purify-X-安装说明.md", import.meta.url),
-    ],
+    ["安装说明", new URL("../docs/Purify-X-安装说明.md", import.meta.url)],
+    ["CHANGELOG.md", new URL("../CHANGELOG.md", import.meta.url)],
   ];
   for (const [label, url] of versionedDocs) {
     const documentHeader = fs

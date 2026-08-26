@@ -2,10 +2,10 @@
 
 ## 开始工作前
 
-- 以 `CLAUDE.md`、`TODO.md`、`docs/Purify-X-安装说明.md` 和 `history/`
-  中的会话记录恢复上下文。
-- 首个 Git 基线为 v1.14.0，当前版本为 **Purify X v2.7.10**。不要从旧临时目录
-  或旧 userscript 副本覆盖当前文件。
+- 先确认当前 Git 根目录、状态与提交，再读 `README.md`、`TODO.md`、
+  `docs/Purify-X-安装说明.md`、`CHANGELOG.md` 和 `history/` 中的会话记录恢复上下文。
+- 首个 Git 基线为 v1.14.0。当前版本以 `package.json`、userscript 头部和脚本内
+  `VERSION` 为准；不要从旧临时目录或旧 userscript 副本覆盖当前文件。
 - 除非用户明确要求，不要使用 Computer Use。代码、Git 和自动化检查优先通过本地
   文件与命令完成。
 
@@ -23,6 +23,7 @@
 - 本地及订阅的“永远放行账号”优先于本地屏蔽、公开名单、社区规则、内容规则和 AI。
 - 不要改名或删除现有 GM 存储键；rebrand 后也要保留升级兼容。
 - 每次隐藏都必须保留可解释的评分与原因；规则调整要防止同一证据重复计分。
+- 性能敏感：减少全页 DOM 查询、MutationObserver 噪声和无效重绘。
 - 不要重新把 X 的 `cellInnerDiv` 压成零高度。连续折叠只压缩脚本自己的占位节点，
   并保留 1px 可测量尾行，避免破坏 X 虚拟列表的滚动锚点。
 
@@ -33,6 +34,9 @@
 - 至少运行 `npm test`（含 `node --check`、评分回归、行为信号回归和回复区
   端到端判定）；涉及存储、名单、缓存或 DOM 时，还要针对成功、失败和回收
   重挂载路径做定向检查。
+- 脚本在没有 `document` 的环境下必须跳过 bootstrap 并暴露 `__PURIFY_X__`，让测试
+  可以直接加载发布文件；正常样本的 `maxScore` 被顶破时先审视规则边界，不要直接
+  抬高上限。
 - 行为判定要保持「DOM 读取」和「纯逻辑」分离：新信号写进
   `computeReplyBehaviorSignals`，DOM 抽取留在 `replyBehaviorRecords`，
   这样才能脱离浏览器回归。
