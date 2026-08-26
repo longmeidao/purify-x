@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.7.9
+// @version      2.7.10
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -24,7 +24,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.7.9";
+  const VERSION = "2.7.10";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -237,6 +237,13 @@
     userName: '[data-testid="User-Name"]',
     profileUserName: '[data-testid="UserName"]',
     socialContext: '[data-testid="socialContext"]',
+    cardWrapper: '[data-testid="card.wrapper"]',
+  });
+
+  const MUTATION_OBSERVER_OPTIONS = Object.freeze({
+    childList: true,
+    characterData: true,
+    subtree: true,
   });
 
   const CLASS = Object.freeze({
@@ -453,9 +460,13 @@
     let telegramLink = false;
 
     for (const rawValue of values) {
-      const compact = normalize(rawValue).replace(/\s+/g, "");
+      const normalized = normalize(rawValue);
+      const compact = normalized.replace(/\s+/g, "");
       if (!compact) continue;
-      if (/(?:^|https?:\/\/|\b)(?:www\.)?(?:t\.me|telegram\.me|telegram\.org)(?:[\/:]|$)/i.test(compact)) {
+      if (
+        /(?:^|https?:\/\/|\b)(?:www\.)?(?:t\.me|telegram\.me|telegram\.org)(?:[\/:]|$)/i.test(compact) ||
+        /(?:^|https?:\/\/|\b)(?:www\.)?(?:t\.me|telegram\.me|telegram\.org)(?=[\/:\s]|$)/i.test(normalized)
+      ) {
         telegramLink = true;
         hasExternalLink = true;
       }
@@ -4517,6 +4528,74 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       : "";
   }
 
+  function snapshotRelationship(rawIdentity, active = true) {
+    const identity =
+      rawIdentity && typeof rawIdentity === "object" ? rawIdentity : {};
+    if (!active) {
+      return {
+        handle: "",
+        userId: "",
+        following: null,
+        idConflict: false,
+      };
+    }
+    const idConflict = identity.idConflict === true;
+    return {
+      handle: normalizeHandle(identity.handle),
+      userId: idConflict ? "" : normalizeUserId(identity.userId),
+      following:
+        identity.following === true
+          ? true
+          : identity.following === false
+            ? false
+            : null,
+      idConflict,
+    };
+  }
+
+  // TweetSnapshot 是 DOM/React 核心证据与规则引擎之间的数据边界。
+  // 它只保留标量和普通对象，既不持有 X 的节点/fiber，也不提前改变正文，
+  // 后续可安全写入回归样本，或由其他数据源提供同一结构。
+  function normalizeTweetSnapshot(rawSnapshot = {}) {
+    const raw =
+      rawSnapshot && typeof rawSnapshot === "object" ? rawSnapshot : {};
+    const promotionSignals =
+      raw.promotionSignals && typeof raw.promotionSignals === "object"
+        ? raw.promotionSignals
+        : {};
+    const behavior =
+      raw.behavior && typeof raw.behavior === "object" ? raw.behavior : {};
+    const repostActive = raw.repost?.isRepost === true;
+    const quoteActive = raw.quote?.isQuote === true;
+
+    return {
+      schemaVersion: 1,
+      statusId: normalizeUserId(raw.statusId),
+      text: String(raw.text || ""),
+      name: String(raw.name || ""),
+      author: snapshotRelationship(raw.author),
+      promotionSignals: {
+        repliesRestricted: promotionSignals.repliesRestricted === true,
+        hasExternalLink: promotionSignals.hasExternalLink === true,
+        telegramLink: promotionSignals.telegramLink === true,
+        policy: String(promotionSignals.policy || ""),
+      },
+      repost: {
+        isRepost: repostActive,
+        ...snapshotRelationship(raw.repost, repostActive),
+      },
+      quote: {
+        isQuote: quoteActive,
+        ...snapshotRelationship(raw.quote, quoteActive),
+      },
+      behavior: {
+        coordinatedBurst: behavior.coordinatedBurst === true,
+        repeatedLowInfo: behavior.repeatedLowInfo === true,
+        duplicateTemplate: behavior.duplicateTemplate === true,
+      },
+    };
+  }
+
   function conversationReplyRestrictionFromReactObjects(
     roots,
     expectedStatusId = "",
@@ -4910,17 +4989,29 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return result;
   }
 
-  function articlePromotionSignals(article, statusId = "", rawText = "") {
+  function articleExternalLinkValues(article) {
     const tweetText = article.querySelector(SELECTOR.tweetText);
+    const links = new Set(tweetText?.querySelectorAll("a[href]") || []);
+    // X 把正文 URL 渲染成预览卡片时，卡片是 tweetText 的兄弟节点；只补读
+    // card.wrapper，不遍历整张 article，避免把引用推文或账号链接当成外层证据。
+    for (const link of article.querySelectorAll(
+      `${SELECTOR.cardWrapper} a[href], a${SELECTOR.cardWrapper}[href]`,
+    )) {
+      links.add(link);
+    }
     const linkValues = [];
-    for (const link of tweetText?.querySelectorAll("a[href]") || []) {
+    for (const link of links) {
       linkValues.push(
         link.getAttribute("href") || "",
         link.getAttribute("title") || "",
         visibleText(link),
       );
     }
-    const links = externalLinkSignals(linkValues);
+    return linkValues;
+  }
+
+  function articlePromotionSignals(article, statusId = "", rawText = "") {
+    const links = externalLinkSignals(articleExternalLinkValues(article));
     // React 树遍历只留给已经同时出现外链与推广话术的少数候选帖；普通时间线
     // 不为读取 conversation_control 付额外成本。
     const promotionCopy = promotionCopySignal(rawText);
@@ -5194,6 +5285,45 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         ? relationshipHandleCache.get(handle)
         : null,
     };
+  }
+
+  function articleTweetSnapshot(
+    article,
+    { statusId = "", handle = "", behavior = {} } = {},
+  ) {
+    const resolvedStatusId = normalizeUserId(
+      statusId || articleStatusId(article),
+    );
+    const resolvedHandle = normalizeHandle(handle || articleHandle(article));
+    const text = visibleText(article.querySelector(SELECTOR.tweetText));
+    const name = visibleText(article.querySelector(SELECTOR.userName));
+    const promotionSignals = articlePromotionSignals(
+      article,
+      resolvedStatusId,
+      text,
+    );
+
+    return normalizeTweetSnapshot({
+      statusId: resolvedStatusId,
+      text,
+      name,
+      author: {
+        handle: resolvedHandle,
+        ...articleRelationshipIdentity(article, resolvedHandle),
+      },
+      promotionSignals,
+      repost: articleRepostIdentity(
+        article,
+        resolvedHandle,
+        resolvedStatusId,
+      ),
+      quote: articleQuotedIdentity(
+        article,
+        resolvedHandle,
+        resolvedStatusId,
+      ),
+      behavior,
+    });
   }
 
   function viewerFollowingState(article, handle) {
@@ -5885,33 +6015,27 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       return;
     }
 
-    const text = visibleText(article.querySelector(SELECTOR.tweetText));
-    const name = visibleText(article.querySelector(SELECTOR.userName));
-    const coordinatedBurst =
-      coordinatedBurstStatusIds.has(currentStatusId);
-    const repeatedLowInfo =
-      repeatedLowInfoStatusIds.has(currentStatusId);
-    const duplicateTemplate =
-      duplicateTemplateStatusIds.has(currentStatusId);
-    const promotionSignals = articlePromotionSignals(
-      article,
-      currentStatusId,
-      text,
-    );
+    const snapshot = articleTweetSnapshot(article, {
+      statusId: currentStatusId,
+      handle,
+      behavior: {
+        coordinatedBurst: coordinatedBurstStatusIds.has(currentStatusId),
+        repeatedLowInfo: repeatedLowInfoStatusIds.has(currentStatusId),
+        duplicateTemplate: duplicateTemplateStatusIds.has(currentStatusId),
+      },
+    });
+    const { text, name, promotionSignals } = snapshot;
+    const {
+      coordinatedBurst,
+      repeatedLowInfo,
+      duplicateTemplate,
+    } = snapshot.behavior;
     const promotion = promotionPattern(text, promotionSignals);
-    const identity = articleRelationshipIdentity(article, handle);
+    const identity = snapshot.author;
     const userId = identity.userId;
-    const repostIdentity = articleRepostIdentity(
-      article,
-      handle,
-      currentStatusId,
-    );
+    const repostIdentity = snapshot.repost;
     const repostHandle = repostIdentity.handle;
-    const quotedIdentity = articleQuotedIdentity(
-      article,
-      handle,
-      currentStatusId,
-    );
+    const quotedIdentity = snapshot.quote;
     const quotedAccount = quotedIdentity.isQuote
       ? relatedAccountVerdict(quotedIdentity)
       : null;
@@ -6656,6 +6780,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       SELECTOR.cell,
       SELECTOR.tweetText,
       SELECTOR.userName,
+      SELECTOR.cardWrapper,
       'a[href*="/status/"][href*="/photo/"]',
       "time",
       '[data-testid$="-follow"]',
@@ -6726,7 +6851,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       const target = elementFrom(record.target);
       if (
         target?.closest?.(
-          `${SELECTOR.tweetText}, ${SELECTOR.userName}`,
+          `${SELECTOR.tweetText}, ${SELECTOR.userName}, ${SELECTOR.cardWrapper}`,
         )
       ) {
         addTopLevelArticle(target.closest(SELECTOR.tweet));
@@ -7916,6 +8041,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       ? {
           test: Object.freeze({
             actionIdentityFromMetadata,
+            articleExternalLinkValues,
             authorHandleFromStatusPath,
             articleFilteringSurfaceEnabled,
             articleFilterScope,
@@ -7930,6 +8056,9 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             mediaPhotosDefaultAction,
             mediaSubtabKind,
             mergeBehaviorRecordCache,
+            mutationScanPlan,
+            mutationObserverOptions: MUTATION_OBSERVER_OPTIONS,
+            normalizeTweetSnapshot,
             profileJsonLdUserId,
             promotionPattern,
             quotedIdentityFromReactObjects,
@@ -8012,7 +8141,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       if (scanPlan.global) scheduleScan(document);
       else if (scanPlan.roots.size > 0) scheduleScan(scanPlan.roots);
     });
-    observer.observe(document.body, { childList: true, subtree: true });
+    observer.observe(document.body, MUTATION_OBSERVER_OPTIONS);
 
     startCustomSubscriptionUpdates();
     startRemoteListUpdates();

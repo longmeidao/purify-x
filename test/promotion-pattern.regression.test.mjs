@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { identityTestApi } from "./helpers/load-script.mjs";
 
 const {
+  articleExternalLinkValues,
   contentPolicyForSurface,
   conversationReplyRestrictionFromReactObjects,
   externalLinkSignals,
@@ -10,6 +11,22 @@ const {
   shouldProtectAuthor,
   timelineResultEnabled,
 } = identityTestApi;
+
+function fakeLink({ href, title = "", text = "" }) {
+  return {
+    getAttribute(name) {
+      return { href, title }[name] || "";
+    },
+    cloneNode() {
+      return {
+        textContent: text,
+        querySelectorAll() {
+          return [];
+        },
+      };
+    },
+  };
+}
 
 test("从当前 X 推文数据识别 by_invitation 关闭评论", () => {
   const statusId = "2091017527350436210";
@@ -69,6 +86,36 @@ test("t.co 缩链结合可见文本识别 Telegram 与普通外链", () => {
       "https://\nafengyue.com/d5Rbd",
     ]),
     { hasExternalLink: true, telegramLink: false },
+  );
+});
+
+test("正文没有明文链接时仍读取外层推文的 Telegram 预览卡片", () => {
+  const cardLink = fakeLink({
+    href: "https://t.co/example-card",
+    text: "t.me 一双人字拖（私人号）",
+  });
+  const tweetText = {
+    querySelectorAll(selector) {
+      assert.equal(selector, "a[href]");
+      return [];
+    },
+  };
+  const article = {
+    querySelector(selector) {
+      return selector === '[data-testid="tweetText"]' ? tweetText : null;
+    },
+    querySelectorAll(selector) {
+      assert.equal(
+        selector,
+        '[data-testid="card.wrapper"] a[href], a[data-testid="card.wrapper"][href]',
+      );
+      return [cardLink];
+    },
+  };
+
+  assert.deepEqual(
+    externalLinkSignals(articleExternalLinkValues(article)),
+    { hasExternalLink: true, telegramLink: true },
   );
 });
 

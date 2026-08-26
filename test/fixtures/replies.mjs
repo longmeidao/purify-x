@@ -10,6 +10,19 @@
 
 export const spam = [
   {
+    id: "telegram-preview-card-without-plain-url",
+    note: "2026-08-26 实测：@RZT0571 正文不写 t.me，只通过外链预览卡片引流",
+    text: "为了回馈广大粉丝对我的支持！凡是今天进我福利群的将不收取任何费用，24h免费对我的粉丝们限时无门槛进入，可观看所有完整视频和写真噢！私信暗号：双字拖 进群电报私",
+    name: "一双人字拖",
+    handle: "RZT0571",
+    options: {
+      repliesRestricted: false,
+      hasExternalLink: true,
+      telegramLink: true,
+    },
+    minScore: 9,
+  },
+  {
     id: "invisible-variation-selector-name",
     note: "变体选择器插入“固炮”不能绕过昵称强规则",
     text: "🌸",
