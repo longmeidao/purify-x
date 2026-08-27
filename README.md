@@ -20,7 +20,7 @@ Purify X 是一个本地运行的 X/Twitter userscript，用于过滤回复区�
   高置信推广内容默认屏蔽并覆盖账号主页 Posts/Replies，两项可分别控制。
 - 当前账号、关系未知账号和永久放行名单优先保护。
 - 每次隐藏保留评分与原因，支持恢复单条及永久放行。
-- 自动同步 MXGA、Twitter Block Porn 与 TweetGuard 公开来源。
+- 自动同步 MXGA、Twitter Block Porn、TweetGuard 与 BlueNoise 公开来源。
 
 ## 隐私
 
@@ -32,8 +32,12 @@ Purify X 是一个本地运行的 X/Twitter userscript，用于过滤回复区�
 要求当前 Node.js LTS，无第三方运行时依赖。
 
 ```sh
+npm run build
 npm test
 ```
+
+`src/` 是可维护源码，根目录 `purify-x.user.js` 是生成的安装产物，不应直接修改。
+职责边界与演进条件见 [架构与构建](docs/架构与构建.md)。
 
 完整配置与已知限制见 [安装说明](docs/Purify-X-安装说明.md)。
 

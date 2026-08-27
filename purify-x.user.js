@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.7.10
+// @version      2.8.0
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -20,15 +20,18 @@
 // @connect      raw.githubusercontent.com
 // @connect      *
 // ==/UserScript==
-
 (() => {
   "use strict";
 
-  const VERSION = "2.7.10";
+  const VERSION = "2.8.0";
 
   const CONFIG = Object.freeze({
     threshold: 7,
     debounceMs: 80,
+    // 首批同步处理以尽快隐藏可疑回复；超出条数或时间预算后让出主线程，
+    // 后续任务在 requestAnimationFrame 中继续，避免长回复串阻塞滚动。
+    scanFrameBudgetMs: 8,
+    scanMaxArticlesPerFrame: 50,
     maxTextLength: 1200,
     minGroupSize: 2,
     collapsedTailHeightPx: 1,
@@ -83,12 +86,15 @@
       "https://raw.githubusercontent.com/daymade/Twitter-Block-Porn/master/lists/all.json",
     tweetGuardCommunityRules:
       "https://raw.githubusercontent.com/viewer12/tweetguard/main/community-rules.json",
+    blueNoiseKeywords:
+      "https://raw.githubusercontent.com/rokcso/bluenoise/refs/heads/main/data/keywords.txt",
     maxMetaChars: 64 * 1024,
     maxMxgaChars: 40 * 1024 * 1024,
     maxWhitelistChars: 4 * 1024 * 1024,
     maxMirrorChars: 32 * 1024 * 1024,
     maxTwitterBlockPornChars: 2 * 1024 * 1024,
     maxTweetGuardChars: 512 * 1024,
+    maxBlueNoiseChars: 512 * 1024,
     // 2026-07 期间 MXGA 名单约每天新增 6.6k 条（7/19 的 14.7 万 → 7/27 的
     // 20.0 万）。上限只用于挡住异常响应，超出时截断降级而不是整份丢弃。
     maxEntries: 500000,
@@ -150,8 +156,9 @@
     mxga: "mxga",
     twitterBlockPorn: "twitterBlockPorn",
     tweetGuard: "tweetGuard",
+    blueNoise: "blueNoise",
   });
-  const BUILTIN_SOURCE_CATALOG_VERSION = 2;
+  const BUILTIN_SOURCE_CATALOG_VERSION = 3;
   const BUILTIN_SOURCE_IDS = Object.freeze(Object.values(BUILTIN_SOURCE));
   const DEFAULT_BUILTIN_SOURCES = Object.freeze([...BUILTIN_SOURCE_IDS]);
   const SOURCE_CATALOG = Object.freeze([
@@ -175,6 +182,13 @@
       shortName: "TweetGuard",
       description: "近期维护的 X 回复正文模板；低权重参与组合评分，不单独定罪。",
       homepage: "https://github.com/viewer12/tweetguard",
+    },
+    {
+      id: BUILTIN_SOURCE.blueNoise,
+      name: "BlueNoise 关键词",
+      shortName: "BlueNoise",
+      description: "多语种垃圾内容关键词；仅导入纯文本项并以低权重参与组合评分。",
+      homepage: "https://github.com/rokcso/bluenoise",
     },
   ]);
 
@@ -366,7 +380,8 @@
   const subscribedBlockedHandles = new Set();
   const subscribedAllowedHandles = new Set();
   const subscribedStrongKeywords = new Set();
-  const remoteCommunityKeywords = new Set();
+  const tweetGuardCommunityKeywords = new Set();
+  const blueNoiseCommunityKeywords = new Set();
   let customSubscriptionUrls = [];
   let enabledBuiltInSources = new Set(DEFAULT_BUILTIN_SOURCES);
   let preferences = { ...DEFAULT_PREFERENCES };
@@ -393,7 +408,10 @@
   let remoteSyncPromise = null;
   let pendingTimer = 0;
   const pendingScanRoots = new Set();
+  const pendingArticleQueue = new Set();
   let pendingGlobalScan = false;
+  let pendingArticleFrame = 0;
+  let articleQueueActive = false;
   let followingRetryTimer = 0;
   let observer;
   let timelineReturnSnapshot = null;
@@ -434,7 +452,6 @@
   let aiStateSaveTimer = 0;
   const aiRuleHitStatusKeys = new Map();
   const aiRuleFalsePositiveStatusKeys = new Map();
-
   function normalize(value) {
     return String(value || "")
       .normalize("NFKC")
@@ -655,7 +672,6 @@
     const text = normalizeKeywordText(rawText);
     return keywordMatcherTest(text, compiledKeywordMatcher(rawKeyword));
   }
-
   function errorMessage(error) {
     return error instanceof Error ? error.message : String(error);
   }
@@ -1453,7 +1469,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     );
     resetAiUsageDay();
   }
-
   function sanitizeKeywordArray(raw) {
     if (!Array.isArray(raw)) return [];
     return [
@@ -1498,11 +1513,11 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         raw.filter((source) => BUILTIN_SOURCE_IDS.includes(source)),
       ),
     ];
-    if (
-      catalogVersion < BUILTIN_SOURCE_CATALOG_VERSION &&
-      !sources.includes(BUILTIN_SOURCE.tweetGuard)
-    ) {
+    if (catalogVersion < 2 && !sources.includes(BUILTIN_SOURCE.tweetGuard)) {
       sources.push(BUILTIN_SOURCE.tweetGuard);
+    }
+    if (catalogVersion < 3 && !sources.includes(BUILTIN_SOURCE.blueNoise)) {
+      sources.push(BUILTIN_SOURCE.blueNoise);
     }
     return sources;
   }
@@ -2190,7 +2205,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     if (typeof GM_registerMenuCommand !== "function") return;
     GM_registerMenuCommand("打开 Purify X 设置", openSettingsPanel);
   }
-
   function startCustomSubscriptionUpdates() {
     if (customSubscriptionUrls.length > 0) {
       void syncCustomSubscriptions(false);
@@ -2757,6 +2771,39 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     };
   }
 
+  function validateBlueNoiseKeywords(raw) {
+    if (typeof raw !== "string") {
+      throw new Error("BlueNoise 关键词响应不是纯文本");
+    }
+    const lines = raw.split(/\r?\n/);
+    if (lines.length > REMOTE.maxRules) {
+      throw new Error(`BlueNoise 关键词数量异常（${lines.length}）`);
+    }
+
+    let skippedRegexCount = 0;
+    const plainKeywords = [];
+    for (const rawLine of lines) {
+      const line = rawLine.trim();
+      if (!line || line.startsWith("#")) continue;
+      // BlueNoise 支持 /pattern/flags；Purify X 不执行外部任意正则，
+      // 只采用可进入现有字面量/token 匹配器的纯文本项。
+      if (/^\/.+\/[a-z]*$/i.test(line)) {
+        skippedRegexCount += 1;
+        continue;
+      }
+      plainKeywords.push(line);
+    }
+    const keywords = sanitizeKeywordArray(plainKeywords);
+    if (keywords.length < 100) {
+      throw new Error(`BlueNoise 缺少足够的纯文本关键词（${keywords.length}）`);
+    }
+    return {
+      version: `n${keywords.length}-${stableHash(raw)}`,
+      keywords,
+      skippedRegexCount,
+    };
+  }
+
   function sanitizeStringArray(raw, limit = REMOTE.maxEntries) {
     if (!Array.isArray(raw) || raw.length > limit) return [];
     const result = [];
@@ -2847,6 +2894,21 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         lastError: String(tweetGuard.lastError || ""),
       };
     }
+    const blueNoise = raw?.sources?.blueNoise;
+    if (blueNoise && typeof blueNoise === "object") {
+      safe.sources.blueNoise = {
+        version: String(blueNoise.version || ""),
+        updatedAt: Number(blueNoise.updatedAt) || 0,
+        checkedAt: Number(blueNoise.checkedAt) || 0,
+        etag: sanitizeEtag(blueNoise.etag),
+        keywords: sanitizeKeywordArray(blueNoise.keywords),
+        skippedRegexCount: Math.max(
+          0,
+          Number(blueNoise.skippedRegexCount) || 0,
+        ),
+        lastError: String(blueNoise.lastError || ""),
+      };
+    }
     return safe;
   }
 
@@ -2918,7 +2980,8 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     remoteWhitelist.clear();
     remoteWhitelistUserIds.clear();
     remoteRules = [];
-    remoteCommunityKeywords.clear();
+    tweetGuardCommunityKeywords.clear();
+    blueNoiseCommunityKeywords.clear();
 
     const mxga = cache.sources.mxga;
     if (mxga && enabledBuiltInSources.has(BUILTIN_SOURCE.mxga)) {
@@ -2972,7 +3035,16 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       enabledBuiltInSources.has(BUILTIN_SOURCE.tweetGuard)
     ) {
       for (const keyword of tweetGuard.keywords) {
-        remoteCommunityKeywords.add(keyword);
+        tweetGuardCommunityKeywords.add(keyword);
+      }
+    }
+    const blueNoise = cache.sources.blueNoise;
+    if (
+      blueNoise &&
+      enabledBuiltInSources.has(BUILTIN_SOURCE.blueNoise)
+    ) {
+      for (const keyword of blueNoise.keywords) {
+        blueNoiseCommunityKeywords.add(keyword);
       }
     }
 
@@ -3173,6 +3245,36 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     };
   }
 
+  async function syncBlueNoiseKeywords(previous = {}) {
+    const previousKeywords = sanitizeKeywordArray(previous.keywords);
+    const response = await requestTextResource(
+      REMOTE.blueNoiseKeywords,
+      REMOTE.maxBlueNoiseChars,
+      "text/plain",
+      { etag: previousKeywords.length >= 100 ? previous.etag : "" },
+    );
+    const now = Date.now();
+    if (response.notModified) {
+      return {
+        ...previous,
+        checkedAt: now,
+        etag: response.etag || sanitizeEtag(previous.etag),
+        keywords: previousKeywords,
+        lastError: "",
+      };
+    }
+    const parsed = validateBlueNoiseKeywords(response.text);
+    return {
+      version: parsed.version,
+      updatedAt: now,
+      checkedAt: now,
+      etag: response.etag,
+      keywords: parsed.keywords,
+      skippedRegexCount: parsed.skippedRegexCount,
+      lastError: "",
+    };
+  }
+
   function withSyncError(previous, error) {
     return {
       ...(previous || {}),
@@ -3198,7 +3300,8 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const previousMxga = remoteCache.sources.mxga;
     const previousTbp = remoteCache.sources.twitterBlockPorn;
     const previousTweetGuard = remoteCache.sources.tweetGuard;
-    const [mxgaResult, tbpResult, tweetGuardResult] =
+    const previousBlueNoise = remoteCache.sources.blueNoise;
+    const [mxgaResult, tbpResult, tweetGuardResult, blueNoiseResult] =
       await Promise.allSettled([
         enabledBuiltInSources.has(BUILTIN_SOURCE.mxga)
           ? syncMxga(previousMxga, force)
@@ -3208,6 +3311,9 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
           : Promise.resolve(null),
         enabledBuiltInSources.has(BUILTIN_SOURCE.tweetGuard)
           ? syncTweetGuardRules(previousTweetGuard)
+          : Promise.resolve(null),
+        enabledBuiltInSources.has(BUILTIN_SOURCE.blueNoise)
+          ? syncBlueNoiseKeywords(previousBlueNoise)
           : Promise.resolve(null),
       ]);
 
@@ -3250,6 +3356,18 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         tweetGuardResult.reason,
       );
     }
+    if (
+      enabledBuiltInSources.has(BUILTIN_SOURCE.blueNoise) &&
+      blueNoiseResult.status === "fulfilled"
+    ) {
+      remoteCache.sources.blueNoise = blueNoiseResult.value;
+      successCount += 1;
+    } else if (enabledBuiltInSources.has(BUILTIN_SOURCE.blueNoise)) {
+      remoteCache.sources.blueNoise = withSyncError(
+        previousBlueNoise,
+        blueNoiseResult.reason,
+      );
+    }
     if (successCount > 0) remoteCache.lastCheckedAt = Date.now();
 
     remoteCache = sanitizeRemoteCache(remoteCache);
@@ -3268,6 +3386,9 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         : "disabled",
       tweetGuard: enabledBuiltInSources.has(BUILTIN_SOURCE.tweetGuard)
         ? tweetGuardResult.status
+        : "disabled",
+      blueNoise: enabledBuiltInSources.has(BUILTIN_SOURCE.blueNoise)
+        ? blueNoiseResult.status
         : "disabled",
     };
   }
@@ -3291,6 +3412,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const mxga = remoteCache.sources.mxga;
     const tbp = remoteCache.sources.twitterBlockPorn;
     const tweetGuard = remoteCache.sources.tweetGuard;
+    const blueNoise = remoteCache.sources.blueNoise;
     let overlapCount = 0;
     let humanCount = 0;
     let autoCount = 0;
@@ -3331,6 +3453,12 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       `  更新时间：${formatTime(tweetGuard?.updatedAt)}`,
       `  状态：${tweetGuard?.lastError || "正常"}`,
       "",
+      `BlueNoise：${enabledBuiltInSources.has(BUILTIN_SOURCE.blueNoise) ? "已启用" : "未启用"} · ${blueNoise?.keywords?.length || 0} 条纯文本关键词`,
+      `  版本：${blueNoise?.version || "未知"}`,
+      `  更新时间：${formatTime(blueNoise?.updatedAt)}`,
+      `  跳过：${blueNoise?.skippedRegexCount || 0} 条外部正则（不执行）`,
+      `  状态：${blueNoise?.lastError || "正常"}`,
+      "",
       `合并后唯一账号：${remoteHandleSources.size} 个（两来源重复 ${overlapCount} 个）`,
       `最近检查：${formatTime(remoteCache.lastCheckedAt)}`,
       "只下载公开名单，不上传当前页面、账号或浏览记录。",
@@ -3350,7 +3478,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       void syncRemoteLists(false);
     }, CONFIG.remoteUpdateMs);
   }
-
   function visibleText(element) {
     if (!element) return "";
     const clone = element.cloneNode(true);
@@ -3877,6 +4004,31 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return matches;
   }
 
+  function communityKeywordEvidence(
+    rawText,
+    sources = [
+      { name: "TweetGuard", keywords: tweetGuardCommunityKeywords },
+      { name: "BlueNoise", keywords: blueNoiseCommunityKeywords },
+    ],
+  ) {
+    const hits = [];
+    const sourceNames = [];
+    for (const source of sources) {
+      const sourceHits = matchedKeywords(
+        rawText,
+        "",
+        source?.keywords || [],
+      );
+      if (sourceHits.length === 0) continue;
+      sourceNames.push(String(source?.name || "社区规则"));
+      for (const hit of sourceHits) {
+        if (!hits.includes(hit)) hits.push(hit);
+        if (hits.length >= 3) break;
+      }
+    }
+    return { hits, sourceNames };
+  }
+
   function scoreReply(
     rawText,
     rawName = "",
@@ -3954,9 +4106,13 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       name,
       subscribedStrongKeywords,
     );
-    const remoteCommunityKeywordHits = remoteIdentity.whitelisted
-      ? []
-      : matchedKeywords(text, "", remoteCommunityKeywords);
+    const remoteCommunityEvidence = remoteIdentity.whitelisted
+      ? { hits: [], sourceNames: [] }
+      : communityKeywordEvidence(
+          text,
+          options.communityKeywordSources,
+        );
+    const remoteCommunityKeywordHits = remoteCommunityEvidence.hits;
     const aiLearnedKeywordHits = aiConfig.enabled
       ? matchedAiLearnedRules(text)
       : [];
@@ -4057,9 +4213,10 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       );
     }
     if (remoteCommunityKeywordHits.length > 0) {
+      const communityNames = remoteCommunityEvidence.sourceNames.join("、");
       add(
         5,
-        `命中 TweetGuard 社区规则“${remoteCommunityKeywordHits.join("、")}”（需结合其他特征）`,
+        `命中 ${communityNames || "社区"} 规则“${remoteCommunityKeywordHits.join("、")}”（需结合其他特征）`,
         EVIDENCE_SOURCE.community,
       );
     }
@@ -4238,7 +4395,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       learnedRuleHits: aiLearnedKeywordHits,
     };
   }
-
   function statusIdFromLocation() {
     const match = location.pathname.match(/\/status\/(\d+)/);
     return match ? match[1] : "";
@@ -5429,7 +5585,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     if (rows.length > limit) visible.push(`另有 ${rows.length - limit} 项`);
     return visible.join("；");
   }
-
   function tweetBadgePlacement(userName, handle) {
     if (!(userName instanceof Element) || !handle) {
       return { host: userName, after: null };
@@ -5570,7 +5725,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       }
     }
   }
-
   function annotateTweetListedAccount(
     article,
     knownHandle = "",
@@ -6222,7 +6376,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       }
     }
   }
-
   function cleanStaleCells() {
     for (const cell of filteredCells) {
       if (!cell.isConnected) filteredCells.delete(cell);
@@ -6630,10 +6783,71 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     }
   }
 
+  function scanWorkShouldYield({
+    processed = 0,
+    elapsedMs = 0,
+    maxArticles = CONFIG.scanMaxArticlesPerFrame,
+    frameBudgetMs = CONFIG.scanFrameBudgetMs,
+  } = {}) {
+    return processed >= maxArticles || elapsedMs >= frameBudgetMs;
+  }
+
+  function clearPendingArticleWork() {
+    pendingArticleQueue.clear();
+    if (pendingArticleFrame) {
+      window.cancelAnimationFrame(pendingArticleFrame);
+      pendingArticleFrame = 0;
+    }
+    articleQueueActive = false;
+  }
+
+  function processPendingArticles() {
+    pendingArticleFrame = 0;
+    // React 对象只在这一小批任务内复用；X 回收 DOM 后下一帧重新读取。
+    scanReactRootsCache = new WeakMap();
+    const startedAt = performance.now();
+    let processed = 0;
+
+    for (const article of pendingArticleQueue) {
+      pendingArticleQueue.delete(article);
+      processed += 1;
+      if (article.isConnected) processArticle(article);
+      if (
+        scanWorkShouldYield({
+          processed,
+          elapsedMs: performance.now() - startedAt,
+        })
+      ) {
+        break;
+      }
+    }
+
+    if (pendingArticleQueue.size > 0) {
+      pendingArticleFrame = window.requestAnimationFrame(
+        processPendingArticles,
+      );
+      return;
+    }
+    articleQueueActive = false;
+    refreshGroups();
+    updateCounter();
+  }
+
+  function enqueueArticles(articles) {
+    for (const article of articles) pendingArticleQueue.add(article);
+    if (articleQueueActive) return;
+    if (pendingArticleQueue.size === 0) {
+      refreshGroups();
+      updateCounter();
+      return;
+    }
+    articleQueueActive = true;
+    // 第一小批同步完成，减少首屏垃圾内容闪现；只有余量进入下一帧。
+    processPendingArticles();
+  }
+
   function scan(root = document) {
     applyMediaPhotosDefault();
-    // 只在同一轮扫描内复用 React roots；X 回收 DOM 后下一轮必须重新读取。
-    scanReactRootsCache = new WeakMap();
     annotateProfileAccount();
     const articleSet = new Set();
     const roots = Array.isArray(root) ? root : [root];
@@ -6656,6 +6870,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         profilePostTimeline: isProfilePostTimeline(),
       })
     ) {
+      clearPendingArticleWork();
       threadBehaviorContextId = "";
       threadBehaviorRecordCache.clear();
       coordinatedBurstStatusIds = new Set();
@@ -6730,10 +6945,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       repeatedLowInfoStatusIds = new Set();
       duplicateTemplateStatusIds = new Set();
     }
-    for (const article of articles) processArticle(article);
-
-    refreshGroups();
-    updateCounter();
+    enqueueArticles(articles);
   }
 
   function scheduleScan(target = document) {
@@ -6944,7 +7156,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       preferences.hideSidebarPromos,
     );
   }
-
   function installStyles() {
     document.getElementById("xps-styles")?.remove();
     const style = document.createElement("style");
@@ -7817,7 +8028,6 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     `;
     document.documentElement.append(style);
   }
-
   function installCounter() {
     document.getElementById("xps-counter")?.remove();
     const button = document.createElement("button");
@@ -8002,6 +8212,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
           Date.now(),
         );
       cancelTimelineReturnRestore();
+      clearPendingArticleWork();
       revealAll = false;
       restoredFingerprints.clear();
       expandedGroupIds.clear();
@@ -8046,6 +8257,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             articleFilteringSurfaceEnabled,
             articleFilterScope,
             contentPolicyForSurface,
+            communityKeywordEvidence,
             conversationReplyRestrictionFromReactObjects,
             detailNavigationStatusId,
             externalLinkSignals,
@@ -8080,12 +8292,15 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             timelineReturnSnapshotIsCurrent,
             requestTextResource,
             responseHeaderValue,
+            scanWorkShouldYield,
             syncTweetGuardRules,
+            syncBlueNoiseKeywords,
             syncTwitterBlockPorn,
             updateAiLearnedRuleFeedback,
             userIdFromReactUser,
             validateMxgaLite,
             validateMxgaWhitelist,
+            validateBlueNoiseKeywords,
           }),
         }
       : {}),

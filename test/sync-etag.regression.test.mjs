@@ -108,15 +108,29 @@ test("内置来源收到 304 时保留数据更新时间", async () => {
     keywords: Array.from({ length: 10 }, (_, index) => `规则${index}`),
     lastError: "旧错误",
   };
+  const previousBlueNoise = {
+    version: "keywords-1",
+    updatedAt: 300,
+    checkedAt: 300,
+    etag: '"bn-2"',
+    keywords: Array.from({ length: 100 }, (_, index) => `关键词${index}`),
+    skippedRegexCount: 12,
+    lastError: "旧错误",
+  };
   try {
     const tbp = await api.syncTwitterBlockPorn(previousTbp);
     const tweetGuard = await api.syncTweetGuardRules(previousTweetGuard);
+    const blueNoise = await api.syncBlueNoiseKeywords(previousBlueNoise);
     assert.equal(tbp.updatedAt, 100);
     assert.equal(tbp.handles.length, 100);
     assert.equal(tbp.lastError, "");
     assert.equal(tweetGuard.updatedAt, 200);
     assert.equal(tweetGuard.version, "rules-1");
     assert.equal(tweetGuard.lastError, "");
+    assert.equal(blueNoise.updatedAt, 300);
+    assert.equal(blueNoise.version, "keywords-1");
+    assert.equal(blueNoise.skippedRegexCount, 12);
+    assert.equal(blueNoise.lastError, "");
   } finally {
     globalThis.GM_xmlhttpRequest = original;
   }

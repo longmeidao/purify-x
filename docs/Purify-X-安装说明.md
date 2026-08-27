@@ -4,7 +4,7 @@
 过滤垃圾回复，并可选在时间线隐藏账号名单内容或高置信推广、在账号主页隐藏
 高置信推广。
 
-当前版本：`2.7.10`
+当前版本：`2.8.0`
 
 ## 安装与更新
 
@@ -31,7 +31,7 @@
 
 ## 设置面板
 
-- **公开来源**：分别启用或关闭 MXGA、Twitter Block Porn 与 TweetGuard，并查看
+- **公开来源**：分别启用或关闭 MXGA、Twitter Block Porn、TweetGuard 与 BlueNoise，并查看
   同步时间、数量和错误。
 - **过滤与显示**：账号名单时间线过滤默认关闭；高置信推广过滤默认开启，并覆盖
   Home、账号主页 Posts/Replies 等列表。MXGA 申诉入口和右栏 Premium/热门话题
@@ -63,9 +63,10 @@
   "builtInSources": [
     "mxga",
     "twitterBlockPorn",
-    "tweetGuard"
+    "tweetGuard",
+    "blueNoise"
   ],
-  "builtInSourceCatalogVersion": 2
+  "builtInSourceCatalogVersion": 3
 }
 ```
 
@@ -126,6 +127,8 @@ Posts/Replies 只运行推广过滤。账号名单过滤默认关闭，高置信
   公开账号名单。
 - [TweetGuard](https://github.com/viewer12/tweetguard)：社区正文模板，按低权重证据
   使用，需与其他内容或行为特征组合。
+- [BlueNoise](https://github.com/rokcso/bluenoise)：多语种垃圾内容关键词。Purify X
+  只采用其中的纯文本项，不执行外部任意正则；同样按低权重证据参与组合评分。
 
 首次运行会下载已启用来源，以后每 6 小时检查更新。同步会校验 schema、字段、账号
 格式、条目数和响应大小；格式错误、数量异常或网络失败时保留旧缓存，各来源互不
@@ -162,6 +165,8 @@ endpoint 必须是 HTTPS 的 OpenAI 兼容 Chat Completions 地址；本机
 - X 复用虚拟列表节点时，脚本会先释放旧状态，再按状态 ID 恢复缓存结果。
 - 增量观察器只补扫受影响的推文；正文、作者或外链预览卡片的文本节点原地更新也会
   触发定向判定，不因点赞数、图片或视频变化反复全页评分。
+- 待评分推文进入去重队列；首批立即处理，剩余任务按每帧最多 50 条或约 8ms 分批，
+  避免长回复串的一次同步扫描阻塞滚动。
 - 连续隐藏只压缩脚本自己的占位节点，并保留可测量高度，不修改 X 虚拟 cell 的高度。
 
 ## 举报、申诉与隐私
