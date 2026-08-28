@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.8.1
+
+- BlueNoise 纯文本关键词从 5 分组合证据调整为 7 分直接屏蔽；TweetGuard 仍按 5 分
+  参与组合评分，同一关键词被多个来源命中时只采用最高权重，不重复计分。
+
 ## 2.8.0
 
 - 将可维护源码按 core、runtime、sources、settings、ui 职责拆分到 `src/`，并增加

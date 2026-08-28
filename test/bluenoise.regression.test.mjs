@@ -22,27 +22,51 @@ test("BlueNoise 响应必须保留足够的有效纯文本关键词", () => {
 
 test("社区关键词保留来源且相同命中不重复列出", () => {
   const evidence = api.communityKeywordEvidence("币安返佣活动", [
-    { name: "TweetGuard", keywords: new Set(["币安"]) },
-    { name: "BlueNoise", keywords: new Set(["币安", "返佣"]) },
+    { name: "TweetGuard", keywords: new Set(["币安"]), points: 5 },
+    {
+      name: "BlueNoise",
+      keywords: new Set(["币安", "返佣"]),
+      points: threshold,
+    },
   ]);
 
   assert.deepEqual(evidence.sourceNames, ["TweetGuard", "BlueNoise"]);
   assert.deepEqual(evidence.hits, ["币安", "返佣"]);
+  assert.equal(evidence.points, threshold);
 });
 
-test("单个宽泛社区关键词只有组合分，不能独立隐藏普通内容", () => {
+test("单个 BlueNoise 关键词直接达到隐藏阈值", () => {
   for (const [text, keyword] of [
     ["我今天在币安看市场", "币安"],
     ["周末去万达广场吃饭", "万达广场"],
   ]) {
     const result = scoreReply(text, "普通用户", "normal_user", {
       communityKeywordSources: [
-        { name: "BlueNoise", keywords: new Set([keyword]) },
+        {
+          name: "BlueNoise",
+          keywords: new Set([keyword]),
+          points: threshold,
+        },
       ],
     });
 
-    assert.equal(result.score, 5);
-    assert.ok(result.score < threshold);
-    assert.match(result.reasons.join("\n"), /BlueNoise/);
+    assert.equal(result.score, threshold);
+    assert.match(result.reasons.join("\n"), /BlueNoise.*直接屏蔽/);
   }
+});
+
+test("TweetGuard 关键词仍需结合其他证据", () => {
+  const result = scoreReply("普通社区模板", "普通用户", "normal_user", {
+    communityKeywordSources: [
+      {
+        name: "TweetGuard",
+        keywords: new Set(["普通社区模板"]),
+        points: 5,
+      },
+    ],
+  });
+
+  assert.equal(result.score, 5);
+  assert.ok(result.score < threshold);
+  assert.match(result.reasons.join("\n"), /需结合其他特征/);
 });

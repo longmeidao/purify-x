@@ -527,12 +527,21 @@
   function communityKeywordEvidence(
     rawText,
     sources = [
-      { name: "TweetGuard", keywords: tweetGuardCommunityKeywords },
-      { name: "BlueNoise", keywords: blueNoiseCommunityKeywords },
+      {
+        name: "TweetGuard",
+        keywords: tweetGuardCommunityKeywords,
+        points: 5,
+      },
+      {
+        name: "BlueNoise",
+        keywords: blueNoiseCommunityKeywords,
+        points: CONFIG.threshold,
+      },
     ],
   ) {
     const hits = [];
     const sourceNames = [];
+    let points = 0;
     for (const source of sources) {
       const sourceHits = matchedKeywords(
         rawText,
@@ -541,12 +550,19 @@
       );
       if (sourceHits.length === 0) continue;
       sourceNames.push(String(source?.name || "社区规则"));
+      const sourcePoints = Number(source?.points);
+      points = Math.max(
+        points,
+        Number.isFinite(sourcePoints)
+          ? Math.max(0, Math.min(CONFIG.threshold, sourcePoints))
+          : 5,
+      );
       for (const hit of sourceHits) {
         if (!hits.includes(hit)) hits.push(hit);
         if (hits.length >= 3) break;
       }
     }
-    return { hits, sourceNames };
+    return { hits, sourceNames, points };
   }
 
   function scoreReply(
@@ -627,7 +643,7 @@
       subscribedStrongKeywords,
     );
     const remoteCommunityEvidence = remoteIdentity.whitelisted
-      ? { hits: [], sourceNames: [] }
+      ? { hits: [], sourceNames: [], points: 0 }
       : communityKeywordEvidence(
           text,
           options.communityKeywordSources,
@@ -734,9 +750,10 @@
     }
     if (remoteCommunityKeywordHits.length > 0) {
       const communityNames = remoteCommunityEvidence.sourceNames.join("、");
+      const directHide = remoteCommunityEvidence.points >= CONFIG.threshold;
       add(
-        5,
-        `命中 ${communityNames || "社区"} 规则“${remoteCommunityKeywordHits.join("、")}”（需结合其他特征）`,
+        remoteCommunityEvidence.points || 5,
+        `命中 ${communityNames || "社区"} 规则“${remoteCommunityKeywordHits.join("、")}”（${directHide ? "直接屏蔽" : "需结合其他特征"}）`,
         EVIDENCE_SOURCE.community,
       );
     }

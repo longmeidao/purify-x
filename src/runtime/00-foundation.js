@@ -1,7 +1,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.8.0";
+  const VERSION = "2.8.1";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -165,7 +165,7 @@
       id: BUILTIN_SOURCE.blueNoise,
       name: "BlueNoise 关键词",
       shortName: "BlueNoise",
-      description: "多语种垃圾内容关键词；仅导入纯文本项并以低权重参与组合评分。",
+      description: "多语种垃圾内容关键词；仅导入纯文本项，命中后直接过滤。",
       homepage: "https://github.com/rokcso/bluenoise",
     },
   ]);

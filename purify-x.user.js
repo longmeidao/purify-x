@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.8.0
+// @version      2.8.1
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.8.0";
+  const VERSION = "2.8.1";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -187,7 +187,7 @@
       id: BUILTIN_SOURCE.blueNoise,
       name: "BlueNoise 关键词",
       shortName: "BlueNoise",
-      description: "多语种垃圾内容关键词；仅导入纯文本项并以低权重参与组合评分。",
+      description: "多语种垃圾内容关键词；仅导入纯文本项，命中后直接过滤。",
       homepage: "https://github.com/rokcso/bluenoise",
     },
   ]);
@@ -4007,12 +4007,21 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
   function communityKeywordEvidence(
     rawText,
     sources = [
-      { name: "TweetGuard", keywords: tweetGuardCommunityKeywords },
-      { name: "BlueNoise", keywords: blueNoiseCommunityKeywords },
+      {
+        name: "TweetGuard",
+        keywords: tweetGuardCommunityKeywords,
+        points: 5,
+      },
+      {
+        name: "BlueNoise",
+        keywords: blueNoiseCommunityKeywords,
+        points: CONFIG.threshold,
+      },
     ],
   ) {
     const hits = [];
     const sourceNames = [];
+    let points = 0;
     for (const source of sources) {
       const sourceHits = matchedKeywords(
         rawText,
@@ -4021,12 +4030,19 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       );
       if (sourceHits.length === 0) continue;
       sourceNames.push(String(source?.name || "社区规则"));
+      const sourcePoints = Number(source?.points);
+      points = Math.max(
+        points,
+        Number.isFinite(sourcePoints)
+          ? Math.max(0, Math.min(CONFIG.threshold, sourcePoints))
+          : 5,
+      );
       for (const hit of sourceHits) {
         if (!hits.includes(hit)) hits.push(hit);
         if (hits.length >= 3) break;
       }
     }
-    return { hits, sourceNames };
+    return { hits, sourceNames, points };
   }
 
   function scoreReply(
@@ -4107,7 +4123,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       subscribedStrongKeywords,
     );
     const remoteCommunityEvidence = remoteIdentity.whitelisted
-      ? { hits: [], sourceNames: [] }
+      ? { hits: [], sourceNames: [], points: 0 }
       : communityKeywordEvidence(
           text,
           options.communityKeywordSources,
@@ -4214,9 +4230,10 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     }
     if (remoteCommunityKeywordHits.length > 0) {
       const communityNames = remoteCommunityEvidence.sourceNames.join("、");
+      const directHide = remoteCommunityEvidence.points >= CONFIG.threshold;
       add(
-        5,
-        `命中 ${communityNames || "社区"} 规则“${remoteCommunityKeywordHits.join("、")}”（需结合其他特征）`,
+        remoteCommunityEvidence.points || 5,
+        `命中 ${communityNames || "社区"} 规则“${remoteCommunityKeywordHits.join("、")}”（${directHide ? "直接屏蔽" : "需结合其他特征"}）`,
         EVIDENCE_SOURCE.community,
       );
     }
