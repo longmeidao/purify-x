@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.8.1
+// @version      2.8.2
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT

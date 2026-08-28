@@ -175,6 +175,27 @@ test("识别不用付费、视频完整版、免费开放和进裙入口变体",
   assert.equal(result.highConfidence, true);
 });
 
+test("开放回复仍识别私密福利、暗号准入和电报相册话术", () => {
+  const text =
+    "我开启了一个不对外公开的福利，完全免费，只有收到暗号的人才能进来，私密相册电报：t.me/Fyoky112 私密暗号：N";
+  const result = promotionPattern(text, {
+    repliesRestricted: false,
+    hasExternalLink: true,
+    telegramLink: true,
+  });
+
+  assert.equal(result.promotionCopy, true);
+  assert.equal(result.highConfidence, true);
+  assert.equal(
+    promotionPattern("这是公司不对外公开的内部福利，收到暗号的人才能进入活动室。", {
+      repliesRestricted: false,
+      hasExternalLink: false,
+      telegramLink: false,
+    }).highConfidence,
+    false,
+  );
+});
+
 test("限制回复与 Telegram 外链组成高置信组合", () => {
   const text = "直达链接：http://t.me/ac520_like1";
   const restricted = promotionPattern(text, {

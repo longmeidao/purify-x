@@ -10,6 +10,19 @@
 
 export const spam = [
   {
+    id: "open-replies-private-telegram-benefit",
+    note: "2026-08-28 实测：@juziyuan828 开放回复，以私密福利、暗号和电报链接引流",
+    text: "我开启了一个不对外公开的福利 🙈🙈完全免费，只有收到暗号的人才能进来～群里藏着大量高清视频和只属于少数人的独家内容...想揭开秘密的💋💋私密相册电报：t.me/Fyoky112 私密暗号：N",
+    name: "JVZIYUAN·",
+    handle: "juziyuan828",
+    options: {
+      repliesRestricted: false,
+      hasExternalLink: true,
+      telegramLink: true,
+    },
+    minScore: 12,
+  },
+  {
     id: "telegram-preview-card-without-plain-url",
     note: "2026-08-26 实测：@RZT0571 正文不写 t.me，只通过外链预览卡片引流",
     text: "为了回馈广大粉丝对我的支持！凡是今天进我福利群的将不收取任何费用，24h免费对我的粉丝们限时无门槛进入，可观看所有完整视频和写真噢！私信暗号：双字拖 进群电报私",
@@ -194,6 +207,14 @@ export const spam = [
 ];
 
 export const ham = [
+  {
+    id: "private-benefit-copy-without-external-link",
+    note: "仅讨论不对外公开的内部福利，没有 Telegram 或其他外链时不能隐藏",
+    text: "这是公司不对外公开的内部福利，收到暗号的人才能进入活动室。",
+    name: "同事",
+    handle: "coworker",
+    maxScore: 3,
+  },
   {
     id: "restricted-replies-without-promotion",
     note: "关闭评论本身不是广告证据，不能单独隐藏",
