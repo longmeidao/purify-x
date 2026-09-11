@@ -170,6 +170,80 @@
     return segments.length >= 2;
   }
 
+  // 批量注册账号的 handle 形态。命中只说明「账号形状异常」，永远不足以
+  // 单独隐藏；真正的证据是它与机器化正文同时出现。返回形态名便于写进原因。
+  function batchHandleShape(rawHandle) {
+    const handle = normalizeHandle(rawHandle);
+    if (!handle) return "";
+
+    if (GARBLED_HANDLE_RE.test(handle)) {
+      const rare = (handle.match(RARE_LETTER_RE) || []).length;
+      let run = 0;
+      let longestRun = 0;
+      for (const character of handle) {
+        run = VOWEL_RE.test(character) ? 0 : run + 1;
+        if (run > longestRun) longestRun = run;
+      }
+      // 稀有字母和长辅音串同时满足才算乱码：真人姓名 handle
+      // （javierzuniga、juarezvazquez）至多满足其中一条。
+      if (rare >= 2 && longestRun >= 4) return "乱码字母串";
+    }
+
+    const clusters = handle.match(HANDLE_DIGIT_CLUSTER_RE) || [];
+    if (clusters.length === 0) return "";
+    // 子信号求和：单条在真实 handle 里都常见（john2024、mary_smith），
+    // 只有累计到门槛才当作批量形态。
+    let suspicion = 0;
+    const longestCluster = clusters.reduce(
+      (longest, cluster) => Math.max(longest, cluster.length),
+      0,
+    );
+    if (longestCluster >= 5) suspicion += 2;
+    if (HANDLE_ALTERNATION_RE.test(handle)) suspicion += 3;
+    const digitCount = clusters.reduce(
+      (total, cluster) => total + cluster.length,
+      0,
+    );
+    if (digitCount / handle.length > 0.45) suspicion += 1;
+    if (handle.length >= 12) suspicion += 1;
+    const letters = handle.replace(HANDLE_DIGIT_CLUSTER_RE, "");
+    if (letters.length >= 5 && !VOWEL_RE.test(letters)) suspicion += 2;
+    return suspicion >= 3 ? "机器数字尾缀" : "";
+  }
+
+  // 「单词沙拉」正文：随机小写英文单词加 emoji，没有标点、数字、大写和链接。
+  // 必须读原始文本 —— scoreReply 内部的 text 已经小写化，用它会把正常英文
+  // 句子也判成沙拉。形状单独出现同样不计分，只在批量 handle 上才成立。
+  function isWordSaladShape(rawText) {
+    const text = String(rawText || "")
+      .normalize("NFKC")
+      .replace(DEFAULT_IGNORABLE_RE, "")
+      .trim();
+    if (!text) return false;
+    const tokens = text.split(/\s+/);
+    if (
+      tokens.length < WORD_SALAD_MIN_TOKENS ||
+      tokens.length > WORD_SALAD_MAX_TOKENS
+    ) {
+      return false;
+    }
+    let words = 0;
+    let emoji = 0;
+    for (const token of tokens) {
+      if (WORD_SALAD_TOKEN_RE.test(token)) {
+        words += 1;
+        continue;
+      }
+      if (WORD_SALAD_EMOJI_TOKEN_RE.test(token)) {
+        emoji += 1;
+        continue;
+      }
+      // 出现数字、标点、大写或非拉丁字符就不是这个形状。
+      return false;
+    }
+    return words >= WORD_SALAD_MIN_WORDS && emoji >= 1;
+  }
+
   // 把回复区的 DOM 读成纯数据，行为判定本身放在 computeReplyBehaviorSignals
   // 里，方便脱离浏览器做回归测试。
   function replyBehaviorRecords(articles) {
@@ -631,6 +705,7 @@
         : null;
     const emojiOnlyReply = isMentionEmojiOnlyReply(text);
     const suspiciousHandle = SUSPICIOUS_HANDLE_RE.test(handle);
+    const batchHandle = batchHandleShape(handle);
     const separatorName = isEmojiSeparatorDisplayName(name);
     const localKeywordHits = matchedKeywords(
       text,
@@ -856,8 +931,25 @@
     if (separatorName) {
       add(2, "昵称使用多段 emoji 分隔广告位样式", EVIDENCE_SOURCE.pattern);
     }
-    if (suspiciousHandle) {
+    // 两套 handle 形态互斥计分：同一个「账号 ID 长得像批量注册」只算一次。
+    if (batchHandle) {
+      add(
+        1,
+        `账号 ID 呈批量注册形态（${batchHandle}）`,
+        EVIDENCE_SOURCE.pattern,
+      );
+    } else if (suspiciousHandle) {
       add(1, "账号 ID 呈批量生成格式", EVIDENCE_SOURCE.pattern);
+    }
+    // 单词沙拉形状单独出现会误伤英文心情贴，批量 handle 形态单独出现会误伤
+    // 真实用户；两者叠加是已实证的批量投放形态，这时才补足到隐藏阈值。
+    // 形状判定只在 handle 已命中锚点时才跑，正常账号不额外花开销。
+    if (batchHandle && isWordSaladShape(rawText)) {
+      add(
+        6,
+        "批量注册形态账号发布随机英文单词与 emoji 拼接的正文",
+        EVIDENCE_SOURCE.pattern,
+      );
     }
     if (isShortEmojiCode(text)) {
       add(8, "短数字/字母 emoji 乱码", EVIDENCE_SOURCE.pattern);

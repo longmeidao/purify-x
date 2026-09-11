@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.8.2
+// @version      2.9.0
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.8.2";
+  const VERSION = "2.9.0";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -321,16 +321,41 @@
   const SUSPICIOUS_HANDLE_RE =
     /(^[a-z]{2,12}\d{5,}$|^[a-z][a-z]+\d{4,}[a-z]?$|^[a-z]{6,}_\d{2,}$)/i;
 
+  // 批量注册账号的两类 handle 形态。两者都只说明「账号形状异常」，
+  // 单独出现永远不足以隐藏，必须叠加机器化正文才构成完整证据。
+  //
+  // 乱码型：连续纯小写字母，且同时满足稀有字母和长辅音串两征。
+  // 均匀随机字母块两条都会撞上，真人姓名 handle（javierzuniga、
+  // juarezvazquez、schwarzenegger）至多满足其一。稀有集合不收
+  // w/k/y —— wayne、wong、kim 这类真名里太常见。
+  const GARBLED_HANDLE_RE = /^[a-z]{12,}$/;
+  const RARE_LETTER_RE = /[jqvxz]/g;
+  const VOWEL_RE = /[aeiou]/;
+  const HANDLE_DIGIT_CLUSTER_RE = /\d+/g;
+  // 字母数字严格交替（a1b2c3d4）是机器生成的强形态，真人极少这样取名。
+  const HANDLE_ALTERNATION_RE = /^(?:[a-z]\d){4,}$|^(?:\d[a-z]){4,}$/;
+
+  // 「单词沙拉」正文：随机小写英文单词加 emoji，无标点、数字、大写和链接。
+  // 形状本身会误伤英文心情贴（some days feel 🖤 hollow），因此不单独计分。
+  const WORD_SALAD_TOKEN_RE = /^[a-z]{2,12}$/;
+  const WORD_SALAD_EMOJI_TOKEN_RE =
+    /^[\p{Extended_Pictographic}][\p{Extended_Pictographic}\uFE0E\uFE0F\u200D]*$/u;
+  const WORD_SALAD_MIN_TOKENS = 5;
+  const WORD_SALAD_MAX_TOKENS = 9;
+  const WORD_SALAD_MIN_WORDS = 4;
+
+  // ASCII p 只按独立暗语处理，不能吞进 LPR 等正常英文缩写。
   const STRONG_TEXT_CONTEXT_RE =
-    /([选選][\s._·-]*妃|同[\s._·-]*城.{0,12}([选選][\s._·-]*妃|约|安排|空降)|[上仩丄][\s._·-]*[门門].{0,12}([选選][\s._·-]*妃|约|空降)|约.{0,2}(炮|p|啪|泡|萢)|全国.{0,4}(安排|可飞)|免费.{0,4}(看片|看黄|约|空降|破处)|主人.{0,5}(领我|调教我)|母狗.{0,5}(找|等).{0,3}主人|想找.{0,8}(哥哥|单男|主人)|无偿.{0,4}(线下|约)|单男.{0,5}(可约|滴滴|私聊)|成人视频|色情直播|激情视频|黄色视频|福利视频|无码高清|自拍偷拍|私房视频)/i;
+    /([选選][\s._·-]*妃|同[\s._·-]*城.{0,12}([选選][\s._·-]*妃|约|安排|空降)|[上仩丄][\s._·-]*[门門].{0,12}([选選][\s._·-]*妃|约|空降)|约.{0,2}(炮|啪|泡|萢)|约[^a-z]{0,2}p(?![a-z])|全国.{0,4}(安排|可飞)|免费.{0,4}(看片|看黄|约|空降|破处)|主人.{0,5}(领我|调教我)|母狗.{0,5}(找|等).{0,3}主人|想找.{0,8}(哥哥|单男|主人)|无偿.{0,4}(线下|约)|单男.{0,5}(可约|滴滴|私聊)|成人视频|色情直播|激情视频|黄色视频|福利视频|无码高清|自拍偷拍|私房视频)/i;
 
   // 这里只保留尚未进入共享强规则或字段上下文强规则的弱特征；
   // 强规则已经足以隐藏，不再在弱规则中重复列词叠加分数。
   const WEAK_SEXUAL_RE =
     /(巨乳|爆乳|人妻|少妇|萝莉|御姐|嫩模|空姐|学生妹|母狗|骚货|高潮|内射|口交|足交|调教|成人片|私房照|私密照|无码AV|国产自拍)/i;
 
+  // “动态”也可指动态利率等普通概念；单独收紧为明确查看或联系方式动作。
   const CTA_RE =
-    /((主页|首页|置顶|简介|签名|资料|头像|动态).{0,10}(看|有|领|取|进|点|加|联系|私聊|链接|资源|福利|惊喜|联系方式)|点击.{0,6}(主页|头像|链接)|进群|加群|私信|私聊|滴滴|扣我|戳我|找我|联系我|来找我)/i;
+    /((主页|首页|置顶|简介|签名|资料|头像).{0,10}(看|有|领|取|进|点|加|联系|私聊|链接|资源|福利|惊喜|联系方式)|动态.{0,10}(看|有|领|取|进|点击|点我|点开|联系|私聊|链接|资源|福利|惊喜|联系方式|加我|加v|加微|加q|加群|加好友)|点击.{0,6}(主页|头像|链接)|进群|加群|私信|私聊|滴滴|扣我|戳我|找我|联系我|来找我)/i;
 
   const CONTACT_RE =
     /(^|[^a-z])(vx|v信|微\s*信全国q|telegram|tg|电报|line|whats\s*app|飞机号|群号|加\s*v)([^a-z]|$)/i;
@@ -3650,6 +3675,80 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return segments.length >= 2;
   }
 
+  // 批量注册账号的 handle 形态。命中只说明「账号形状异常」，永远不足以
+  // 单独隐藏；真正的证据是它与机器化正文同时出现。返回形态名便于写进原因。
+  function batchHandleShape(rawHandle) {
+    const handle = normalizeHandle(rawHandle);
+    if (!handle) return "";
+
+    if (GARBLED_HANDLE_RE.test(handle)) {
+      const rare = (handle.match(RARE_LETTER_RE) || []).length;
+      let run = 0;
+      let longestRun = 0;
+      for (const character of handle) {
+        run = VOWEL_RE.test(character) ? 0 : run + 1;
+        if (run > longestRun) longestRun = run;
+      }
+      // 稀有字母和长辅音串同时满足才算乱码：真人姓名 handle
+      // （javierzuniga、juarezvazquez）至多满足其中一条。
+      if (rare >= 2 && longestRun >= 4) return "乱码字母串";
+    }
+
+    const clusters = handle.match(HANDLE_DIGIT_CLUSTER_RE) || [];
+    if (clusters.length === 0) return "";
+    // 子信号求和：单条在真实 handle 里都常见（john2024、mary_smith），
+    // 只有累计到门槛才当作批量形态。
+    let suspicion = 0;
+    const longestCluster = clusters.reduce(
+      (longest, cluster) => Math.max(longest, cluster.length),
+      0,
+    );
+    if (longestCluster >= 5) suspicion += 2;
+    if (HANDLE_ALTERNATION_RE.test(handle)) suspicion += 3;
+    const digitCount = clusters.reduce(
+      (total, cluster) => total + cluster.length,
+      0,
+    );
+    if (digitCount / handle.length > 0.45) suspicion += 1;
+    if (handle.length >= 12) suspicion += 1;
+    const letters = handle.replace(HANDLE_DIGIT_CLUSTER_RE, "");
+    if (letters.length >= 5 && !VOWEL_RE.test(letters)) suspicion += 2;
+    return suspicion >= 3 ? "机器数字尾缀" : "";
+  }
+
+  // 「单词沙拉」正文：随机小写英文单词加 emoji，没有标点、数字、大写和链接。
+  // 必须读原始文本 —— scoreReply 内部的 text 已经小写化，用它会把正常英文
+  // 句子也判成沙拉。形状单独出现同样不计分，只在批量 handle 上才成立。
+  function isWordSaladShape(rawText) {
+    const text = String(rawText || "")
+      .normalize("NFKC")
+      .replace(DEFAULT_IGNORABLE_RE, "")
+      .trim();
+    if (!text) return false;
+    const tokens = text.split(/\s+/);
+    if (
+      tokens.length < WORD_SALAD_MIN_TOKENS ||
+      tokens.length > WORD_SALAD_MAX_TOKENS
+    ) {
+      return false;
+    }
+    let words = 0;
+    let emoji = 0;
+    for (const token of tokens) {
+      if (WORD_SALAD_TOKEN_RE.test(token)) {
+        words += 1;
+        continue;
+      }
+      if (WORD_SALAD_EMOJI_TOKEN_RE.test(token)) {
+        emoji += 1;
+        continue;
+      }
+      // 出现数字、标点、大写或非拉丁字符就不是这个形状。
+      return false;
+    }
+    return words >= WORD_SALAD_MIN_WORDS && emoji >= 1;
+  }
+
   // 把回复区的 DOM 读成纯数据，行为判定本身放在 computeReplyBehaviorSignals
   // 里，方便脱离浏览器做回归测试。
   function replyBehaviorRecords(articles) {
@@ -4111,6 +4210,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
         : null;
     const emojiOnlyReply = isMentionEmojiOnlyReply(text);
     const suspiciousHandle = SUSPICIOUS_HANDLE_RE.test(handle);
+    const batchHandle = batchHandleShape(handle);
     const separatorName = isEmojiSeparatorDisplayName(name);
     const localKeywordHits = matchedKeywords(
       text,
@@ -4336,8 +4436,25 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     if (separatorName) {
       add(2, "昵称使用多段 emoji 分隔广告位样式", EVIDENCE_SOURCE.pattern);
     }
-    if (suspiciousHandle) {
+    // 两套 handle 形态互斥计分：同一个「账号 ID 长得像批量注册」只算一次。
+    if (batchHandle) {
+      add(
+        1,
+        `账号 ID 呈批量注册形态（${batchHandle}）`,
+        EVIDENCE_SOURCE.pattern,
+      );
+    } else if (suspiciousHandle) {
       add(1, "账号 ID 呈批量生成格式", EVIDENCE_SOURCE.pattern);
+    }
+    // 单词沙拉形状单独出现会误伤英文心情贴，批量 handle 形态单独出现会误伤
+    // 真实用户；两者叠加是已实证的批量投放形态，这时才补足到隐藏阈值。
+    // 形状判定只在 handle 已命中锚点时才跑，正常账号不额外花开销。
+    if (batchHandle && isWordSaladShape(rawText)) {
+      add(
+        6,
+        "批量注册形态账号发布随机英文单词与 emoji 拼接的正文",
+        EVIDENCE_SOURCE.pattern,
+      );
     }
     if (isShortEmojiCode(text)) {
       add(8, "短数字/字母 emoji 乱码", EVIDENCE_SOURCE.pattern);
@@ -8273,6 +8390,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             authorHandleFromStatusPath,
             articleFilteringSurfaceEnabled,
             articleFilterScope,
+            batchHandleShape,
             contentPolicyForSurface,
             communityKeywordEvidence,
             conversationReplyRestrictionFromReactObjects,
@@ -8280,6 +8398,7 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
             externalLinkSignals,
             isProfileMediaPath,
             isProfilePostTimeline,
+            isWordSaladShape,
             keywordMatches,
             matchedKeywords,
             mediaPhotosDefaultAction,

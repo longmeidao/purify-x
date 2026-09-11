@@ -1,0 +1,10 @@
+{
+  "corpus_version": 1,
+  "note": "判定语料的全局指标门槛。逐条 minScore/maxScore 管单个样本，这里管整体：规则放宽导致误伤面扩大时，即使没有哪一条样本被顶破，precision 与误报率也会先失守。",
+  "min_spam": 23,
+  "min_ham": 22,
+  "min_precision": 1,
+  "min_recall": 1,
+  "max_false_positive_rate": 0,
+  "max_known_limitation": 0
+}
