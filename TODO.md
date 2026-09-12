@@ -58,7 +58,7 @@
 - [x] 发布前检查仓库中不包含 API Key、Cookie、本地路径、私人放行名单、浏览记录或
   未经核实的个人数据。
 - [x] 创建公开 GitHub 仓库并在 `main` 提供可直接安装及自动更新的 `.user.js`。
-- [ ] 添加版本标签与 GitHub Release。
+- [x] 添加版本标签与 GitHub Release；按实际 Git 快照补录历史版本，无独立快照的版本在 CHANGELOG 中注明。
 
 ## 顺序
 

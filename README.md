@@ -3,6 +3,10 @@
 Purify X 是一个本地运行的 X/Twitter userscript，用于过滤回复区和可选时间线中的
 引流、诈骗、批量垃圾与高置信推广内容。
 
+当前版本：**2.9.1** · [更新日志](CHANGELOG.md) · [最新 Release](https://github.com/longmeidao/purify-x/releases/latest) · [历史版本](https://github.com/longmeidao/purify-x/releases)
+
+本次更新：修复作者自回复的推广漏判，新增专属优惠券话术识别；正常续写仍放行。
+
 ## 安装
 
 1. 安装 Violentmonkey（推荐）或 Tampermonkey。
@@ -41,6 +45,13 @@ npm test
 职责边界与演进条件见 [架构与构建](docs/架构与构建.md)。
 
 完整配置与已知限制见 [安装说明](docs/Purify-X-安装说明.md)。
+
+## 发布
+
+发布时同步 `package.json`、userscript 元数据、脚本内 `VERSION`、安装说明和本页版本，
+补充 `CHANGELOG.md`，运行 `npm run build` 与 `npm test`。推送代码后，必须在对应提交
+创建版本标签和 GitHub Release，发布说明取自该版本 CHANGELOG，并附上该提交生成的脚本。
+仅推送 `main` 不会自动创建 Release；历史补录以实际代码快照为准。
 
 ## License
 
