@@ -128,15 +128,14 @@
     return "wait";
   }
 
-  // 用户进入详情页就是为了阅读主贴，因此主贴始终保留；主贴作者在本会话里的
-  // 自续写回复同样放行（用户主动点进该账号的帖子，即有意阅读其内容），只有
-  // 其他账号的回复运行完整内容与行为规则。时间线的账号名单和高置信推广分别由
-  // 独立开关控制。身份判定优先比 statusId，DOM 提取异常时回落到作者 handle。
+  // 主贴始终保留；作者续写仅在当前回复自身命中高置信推广时进入评分。
+  // statusId 缺失时保留作者兜底保护，不能把主贴误当回复。
   function articleFilterScope({
     mainStatusId = "",
     currentStatusId = "",
     mainAuthorHandle = "",
     currentAuthorHandle = "",
+    highConfidencePromotion = false,
     timelineEligible = false,
     filterTimeline = false,
     filterTimelinePromotions = false,
@@ -145,7 +144,12 @@
       const isFocusOrThreadAuthor =
         currentStatusId === mainStatusId ||
         (mainAuthorHandle && currentAuthorHandle === mainAuthorHandle);
-      return isFocusOrThreadAuthor ? "none" : "thread-reply";
+      if (isFocusOrThreadAuthor) {
+        return currentStatusId && currentStatusId !== mainStatusId && highConfidencePromotion
+          ? "thread-promotion"
+          : "none";
+      }
+      return "thread-reply";
     }
     return timelineEligible && (filterTimeline || filterTimelinePromotions)
       ? "timeline"
@@ -179,6 +183,9 @@
     accountTimelineEligible = true,
     promotionTimelineEligible = true,
   } = {}) {
+    if (scope === "thread-promotion") {
+      return highConfidencePromotion ? "promotion-candidate" : "none";
+    }
     if (scope === "thread-reply") return "full";
     if (scope === "timeline") {
       if (

@@ -124,3 +124,13 @@ test("扫描入口不会跳过账号主页帖子列表", () => {
     true,
   );
 });
+
+test("作者推广续写使用高置信策略，仍保护未知关系与当前账号", () => {
+  assert.equal(api.contentPolicyForSurface({ scope: "thread-promotion", highConfidencePromotion: true }), "promotion-candidate");
+  assert.equal(api.contentPolicyForSurface({ scope: "thread-promotion", highConfidencePromotion: false }), "none");
+  for (const input of [{ following: null }, { following: false, isSelf: true }]) {
+    assert.equal(api.shouldProtectAuthor({ ...input, highConfidencePromotion: true }), true);
+  }
+  // 重挂载不信任旧广告缓存，先放行，再由当前正文重新判定。
+  assert.equal(api.shouldForgetCachedHiddenForSurface({ mainStatusId: "100", currentStatusId: "101", mainAuthorHandle: "sampleauthor", currentAuthorHandle: "sampleauthor" }), true);
+});

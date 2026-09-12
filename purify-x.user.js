@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Purify X
 // @namespace    https://lmd.gg/
-// @version      2.9.0
+// @version      2.9.1
 // @description  净化 X/Twitter 回复区与可选时间线中的引流、诈骗、批量垃圾及高置信推广内容。
 // @author       Codex
 // @license      MIT
@@ -23,7 +23,7 @@
 (() => {
   "use strict";
 
-  const VERSION = "2.9.0";
+  const VERSION = "2.9.1";
 
   const CONFIG = Object.freeze({
     threshold: 7,
@@ -364,7 +364,7 @@
   // 普通外链仍须结合结构化回复限制；Telegram 引流本身更明确，可与推广话术
   // 组成高置信组合。单独的外链或推广词都不定罪。
   const PROMOTION_COPY_RE =
-    /(回馈.{0,8}粉丝|反馈.{0,8}粉丝|福利群|分享给粉丝|粉丝.{0,8}(支持|福利|免费|无门槛)|不对外公开.{0,4}福利|(?:收到|知道|凭).{0,4}(?:暗号|口令).{0,8}(?:进|加入|进入)|私密(?:相册)?电报|私密空间|不用.{0,3}(付费|收费)|今天.{0,4}进[群裙]|限时.{0,8}(免费|无门槛|进入)|免费.{0,5}开放|(?:免费|无门槛).{0,12}(进入|进[群裙]|观看|完整版|互动)|(?:完整|完整版).{0,8}(视频|写真|互动)|(视频|写真).{0,5}完整版|进[群裙].{0,5}入口|线上\s*1v1|唯一链接|私信暗号|私密暗号|进群方式|下载.{0,8}(纸飞机|飞机|telegram)|永久更新|极品推荐|打开即玩|无限制\s*ai)/i;
+    /(专属优惠券|粉丝专属.{0,6}(优惠|折扣)|回馈.{0,8}粉丝|反馈.{0,8}粉丝|福利群|分享给粉丝|粉丝.{0,8}(支持|福利|免费|无门槛)|不对外公开.{0,4}福利|(?:收到|知道|凭).{0,4}(?:暗号|口令).{0,8}(?:进|加入|进入)|私密(?:相册)?电报|私密空间|不用.{0,3}(付费|收费)|今天.{0,4}进[群裙]|限时.{0,8}(免费|无门槛|进入)|免费.{0,5}开放|(?:免费|无门槛).{0,12}(进入|进[群裙]|观看|完整版|互动)|(?:完整|完整版).{0,8}(视频|写真|互动)|(视频|写真).{0,5}完整版|进[群裙].{0,5}入口|线上\s*1v1|唯一链接|私信暗号|私密暗号|进群方式|下载.{0,8}(纸飞机|飞机|telegram)|永久更新|极品推荐|打开即玩|无限制\s*ai)/i;
 
   const GENERIC_REPLY_RE =
     /^(wow|nice|great|amazing|awesome|beautiful|cute|cool|love it|so true|exactly|interesting|good one|well said|哈哈+|确实|真的|支持|厉害|不错|可以|牛啊|太棒了)[!.。,，！\s\p{Extended_Pictographic}]*$/iu;
@@ -4659,15 +4659,14 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     return "wait";
   }
 
-  // 用户进入详情页就是为了阅读主贴，因此主贴始终保留；主贴作者在本会话里的
-  // 自续写回复同样放行（用户主动点进该账号的帖子，即有意阅读其内容），只有
-  // 其他账号的回复运行完整内容与行为规则。时间线的账号名单和高置信推广分别由
-  // 独立开关控制。身份判定优先比 statusId，DOM 提取异常时回落到作者 handle。
+  // 主贴始终保留；作者续写仅在当前回复自身命中高置信推广时进入评分。
+  // statusId 缺失时保留作者兜底保护，不能把主贴误当回复。
   function articleFilterScope({
     mainStatusId = "",
     currentStatusId = "",
     mainAuthorHandle = "",
     currentAuthorHandle = "",
+    highConfidencePromotion = false,
     timelineEligible = false,
     filterTimeline = false,
     filterTimelinePromotions = false,
@@ -4676,7 +4675,12 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
       const isFocusOrThreadAuthor =
         currentStatusId === mainStatusId ||
         (mainAuthorHandle && currentAuthorHandle === mainAuthorHandle);
-      return isFocusOrThreadAuthor ? "none" : "thread-reply";
+      if (isFocusOrThreadAuthor) {
+        return currentStatusId && currentStatusId !== mainStatusId && highConfidencePromotion
+          ? "thread-promotion"
+          : "none";
+      }
+      return "thread-reply";
     }
     return timelineEligible && (filterTimeline || filterTimelinePromotions)
       ? "timeline"
@@ -4710,6 +4714,9 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     accountTimelineEligible = true,
     promotionTimelineEligible = true,
   } = {}) {
+    if (scope === "thread-promotion") {
+      return highConfidencePromotion ? "promotion-candidate" : "none";
+    }
     if (scope === "thread-reply") return "full";
     if (scope === "timeline") {
       if (
@@ -6286,11 +6293,19 @@ Only emit a signature when is_spam=true, confidence>=90, and a legitimate user w
     const promotionTimelineEligible =
       accountTimelineEligible || isProfilePostTimeline();
     const handle = articleHandle(article);
+    // 只为已确认的作者续写提前抽取快照，其余页面保留原有快速退出路径。
+    const continuationSnapshot = mainStatusId && currentStatusId &&
+      currentStatusId !== mainStatusId && handle && handle === authorHandleFromStatusPath()
+      ? articleTweetSnapshot(article, { statusId: currentStatusId, handle })
+      : null;
     const filterScope = articleFilterScope({
       mainStatusId,
       currentStatusId,
       mainAuthorHandle: authorHandleFromStatusPath(),
       currentAuthorHandle: handle,
+      highConfidencePromotion: Boolean(continuationSnapshot && promotionPattern(
+        continuationSnapshot.text, continuationSnapshot.promotionSignals,
+      ).highConfidence),
       timelineEligible:
         accountTimelineEligible || promotionTimelineEligible,
       filterTimeline: preferences.filterTimeline,

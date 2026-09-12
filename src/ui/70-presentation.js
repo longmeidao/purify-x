@@ -565,11 +565,19 @@
     const promotionTimelineEligible =
       accountTimelineEligible || isProfilePostTimeline();
     const handle = articleHandle(article);
+    // 只为已确认的作者续写提前抽取快照，其余页面保留原有快速退出路径。
+    const continuationSnapshot = mainStatusId && currentStatusId &&
+      currentStatusId !== mainStatusId && handle && handle === authorHandleFromStatusPath()
+      ? articleTweetSnapshot(article, { statusId: currentStatusId, handle })
+      : null;
     const filterScope = articleFilterScope({
       mainStatusId,
       currentStatusId,
       mainAuthorHandle: authorHandleFromStatusPath(),
       currentAuthorHandle: handle,
+      highConfidencePromotion: Boolean(continuationSnapshot && promotionPattern(
+        continuationSnapshot.text, continuationSnapshot.promotionSignals,
+      ).highConfidence),
       timelineEligible:
         accountTimelineEligible || promotionTimelineEligible,
       filterTimeline: preferences.filterTimeline,

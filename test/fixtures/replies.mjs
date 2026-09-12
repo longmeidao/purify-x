@@ -10,6 +10,13 @@
 
 export const spam = [
   {
+    id: "author-reply-coupon-telegram",
+    note: "用户截图中的优惠券加 Telegram 引流；账号与链接匿名化",
+    text: "同款专属优惠券：搜索旗舰店 找客服报：【示例】就可以领粉丝专属超值大额惊喜！🔥想看我的全部资源 (t.me/examplebot)🔥 跳转至我的主页",
+    name: "示例", handle: "sampleauthor",
+    options: { hasExternalLink: true, telegramLink: true }, minScore: 8,
+  },
+  {
     id: "open-replies-private-telegram-benefit",
     note: "2026-08-28 实测：@juziyuan828 开放回复，以私密福利、暗号和电报链接引流",
     text: "我开启了一个不对外公开的福利 🙈🙈完全免费，只有收到暗号的人才能进来～群里藏着大量高清视频和只属于少数人的独家内容...想揭开秘密的💋💋私密相册电报：t.me/Fyoky112 私密暗号：N",
@@ -239,6 +246,9 @@ export const spam = [
 ];
 
 export const ham = [
+  { id: "coupon-without-link", text: "同款专属优惠券，粉丝专属优惠", name: "示例", handle: "sampleauthor", maxScore: 3 },
+  { id: "ordinary-telegram-project-link", text: "项目讨论群 t.me/examplegroup", name: "示例", handle: "sampleauthor", options: { hasExternalLink: true, telegramLink: true }, maxScore: 4 },
+
   {
     id: "private-benefit-copy-without-external-link",
     note: "仅讨论不对外公开的内部福利，没有 Telegram 或其他外链时不能隐藏",

@@ -99,3 +99,14 @@ export const mediaSubtabLabels = [
   { label: "影片", expected: "videos" },
   { label: "Media", expected: "" },
 ];
+
+for (const [id, currentStatusId, highConfidencePromotion, expectedScope] of [
+  ["promotional-author-reply", "101", true, "thread-promotion"],
+  ["ordinary-author-continuation", "101", false, "none"],
+  ["promotional-main-stays-visible", "100", true, "none"],
+  ["missing-status-stays-visible", "", true, "none"],
+]) {
+  surfaceCases.push({ id, note: "作者续写仅对当前回复自身的高置信推广解除保护",
+    input: { mainStatusId: "100", currentStatusId, mainAuthorHandle: "sampleauthor",
+      currentAuthorHandle: "sampleauthor", highConfidencePromotion }, expectedScope });
+}
